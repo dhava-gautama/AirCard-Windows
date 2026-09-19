@@ -106,7 +106,7 @@ pub fn parse_passthm_file(
 
     let digit_re = Regex::new(r"(?:^[a-zA-Z]+-)?([0-9*#])(?:-([^-\n]+))?").unwrap();
     let simple_digit_re = Regex::new(r"([0-9*#])").unwrap();
-    let white_strip_re = Regex::new(r"(?i)--?white$").unwrap();
+    let white_strip_re = Regex::new(r"(?i)--?white(?:-bold)?$").unwrap();
 
     let ru_map: HashMap<&str, &str> = KEYPAD_SUBTEXTS_RU.iter().copied().collect();
     let en_map: HashMap<&str, &str> = KEYPAD_SUBTEXTS_EN.iter().copied().collect();
@@ -172,11 +172,14 @@ pub fn parse_passthm_file(
             let mut add_variant = |prefix: &str, sub: &str| {
                 if sub.is_empty() {
                     items_dict.insert(format!("{}-{}---white.png", prefix, d), data.clone());
+                    items_dict.insert(format!("{}-{}---white-bold.png", prefix, d), data.clone());
                 } else {
                     items_dict.insert(format!("{}-{}-{}--white.png", prefix, d, sub), data.clone());
+                    items_dict.insert(format!("{}-{}-{}--white-bold.png", prefix, d, sub), data.clone());
                     let nospace = sub.replace(' ', "");
                     if nospace != sub {
                         items_dict.insert(format!("{}-{}-{}--white.png", prefix, d, nospace), data.clone());
+                        items_dict.insert(format!("{}-{}-{}--white-bold.png", prefix, d, nospace), data.clone());
                     }
                 }
             };
@@ -289,8 +292,11 @@ mod tests {
 
         let leaf_names: Vec<&str> = theme.items.iter().map(|(_, leaf, _)| leaf.as_str()).collect();
         assert!(leaf_names.contains(&"ru-0---white.png"));
+        assert!(leaf_names.contains(&"ru-0---white-bold.png"));
         assert!(leaf_names.contains(&"ru-2-А Б В Г--white.png"));
+        assert!(leaf_names.contains(&"ru-2-А Б В Г--white-bold.png"));
         assert!(leaf_names.contains(&"en-2-A B C--white.png"));
+        assert!(leaf_names.contains(&"en-2-A B C--white-bold.png"));
 
         let _ = std::fs::remove_file(test_path);
     }

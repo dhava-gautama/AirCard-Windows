@@ -44,14 +44,16 @@ File hasil: `target\release\aircard.exe`.
    - Buka **Wallet**, atau klik dua kali tombol samping untuk Apple Pay.
    - Ketuk kartu yang ingin diubah.
    - AirCard menyimpan hash kartu. Klik **Stop**.
-4. **Choose Image...** — PNG, JPG, atau WebP. Gambar dipotong tengah dan diubah ke `1536 × 969`.
-5. **Apply Card Skin**. Tunggu sampai selesai (satu sesi sinkron, bukan delapan kali).
+4. **Choose Image...** — PNG, JPG, WebP, atau PDF. Geser zoom/pan jika perlu. Kartu tersimpan bisa diganti nama; **Pasang gambar terakhir** membuka file yang tadi dipakai.
+5. **Pasang kulit kartu**. **Kembalikan kulit AirCard terakhir** memakai PNG sebelumnya yang disimpan aplikasi (pasang dua kali supaya ada salinan lama).
 6. Di iPhone, **paksa tutup Wallet** (App Switcher: geser Wallet ke atas) lalu buka lagi.
 
 ### Lewat command line
 
 ```powershell
 .\aircard.exe --flash "HASH_KARTU_DI_SINI" "D:\gambar.png"
+.\aircard.exe --flash "HASH_KARTU_DI_SINI" "D:\suica.pdf"
+.\aircard.exe --passcode "D:\tema.passthm"
 ```
 
 Hash contoh terlihat seperti `k6pyiSrrP1J2v3t51G1sEDDnOZo=` (hasil Scan, bukan nomor kartu bank).
@@ -59,15 +61,13 @@ Hash contoh terlihat seperti `k6pyiSrrP1J2v3t51G1sEDDnOZo=` (hasil Scan, bukan n
 ## Tema keypad kode sandi
 
 1. Tab **Passcode**.
-2. Pilih file `.passthm`.
+2. Pilih file `.passthm`, **atau** potong wallpaper menjadi 10 tombol bundar, **atau** folder berisi `0.png`…`9.png`.
 3. Cache iOS:
    - **Auto (TelephonyUI-10)** — iOS 18+
    - **TelephonyUI-9** — iOS 16–17
    - **TelephonyUI-8** — iOS lama
-4. **Apply Passcode Theme**.
-5. Kunci layar iPhone untuk melihat tombol baru.
-
-**Teks Tebal harus MATI:** Pengaturan → Tampilan & Kecerahan → **Teks Tebal** off. Kalau nyala, iOS menggambar font sistem dan mengabaikan gambar tombol.
+4. **Apply Passcode Theme**. Cache **Teks Tebal** (`--white-bold`) ikut ditulis.
+5. Kunci layar iPhone untuk melihat tombol baru. Teks Tebal boleh tetap nyala.
 
 ## Kalau gagal
 
@@ -77,7 +77,7 @@ Hash contoh terlihat seperti `k6pyiSrrP1J2v3t51G1sEDDnOZo=` (hasil Scan, bukan n
 | `SyncAllowed` tidak muncul | Buka kunci, layar nyala, buka **Buku** sekali |
 | `SyncFailed` / timeout 35 detik | Pakai build fork ini (bukan `aircard.exe` rilis Lumid-Off lama). Tutup iTunes / Apple Devices |
 | Kulit tidak kelihatan | Paksa tutup Wallet, atau reboot iPhone |
-| Tema passcode tidak kelihatan | Matikan Teks Tebal, kunci layar ulang |
+| Tema passcode tidak kelihatan | Kunci layar ulang; pastikan cache `--white-bold` ikut (build 1.3+) |
 
 Kalau iPhone masih tidak muncul, driver USB Apple di Windows sering rusak. Langkah opsional:
 

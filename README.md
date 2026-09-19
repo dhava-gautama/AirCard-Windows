@@ -17,8 +17,13 @@ Verified on **iPhone 18,2 / iOS 26.6** over USB.
 
 ## Features
 
-- Custom Apple Pay / Apple Cash card artwork
-- Cowabunga / Nugget `.passthm` lockscreen keypad themes
+- Custom Apple Pay / Apple Cash card artwork (PNG / JPG / WebP / **PDF** for Suica-style art)
+- Pan / zoom crop before flash
+- Named saved cards, last-image reapply, revert previous AirCard skin
+- Cowabunga / Nugget `.passthm` lockscreen keypad themes, including **Bold Text** (`--white-bold`) caches
+- Mac-style keypad creator: poster-slice a wallpaper, or load `0.png`…`9.png`
+- UI language: EN / ID
+- iTunes / Apple Devices warning before AirTraffic
 - Single native `aircard.exe` (egui), no Python runtime
 - Syslog card-hash scan while you tap a card in Wallet
 - Books state snapshot + restore after the write
@@ -46,21 +51,25 @@ CLI:
 
 ```powershell
 .\target\release\aircard.exe --flash "CARD_HASH" "D:\art.png"
+.\target\release\aircard.exe --flash "CARD_HASH" "D:\suica.pdf"
+.\target\release\aircard.exe --passcode "D:\theme.passthm"
+.\target\release\aircard.exe --passcode "D:\theme.passthm" TelephonyUI-10 English
 ```
 
 ## Wallet skins
 
 1. USB, unlocked, **Trust this Computer**.
 2. Wallet tab → **Scan**. Open Wallet (or double-click Side button), tap the card, **Stop**.
-3. **Choose Image...** (PNG / JPG / WebP → `1536 × 969`).
-4. **Apply Card Skin**.
+3. **Choose Image...** (PNG / JPG / WebP / PDF). Use the frame sliders to pan/zoom. Saved cards can be renamed; **Apply last image** reloads the path you used last.
+4. **Apply Card Skin**. **Revert last AirCard skin** restores the previous PNG this app stored for that hash (apply twice to have a previous copy).
 5. Force-close Wallet on the iPhone and reopen it.
 
 ## Passcode themes
 
-1. Passcode tab → choose a `.passthm`.
+1. Passcode tab → choose a `.passthm`, **or** slice a wallpaper / load a folder of `0.png`…`9.png`.
 2. Cache: **TelephonyUI-10** (iOS 18+), **9** (16–17), **8** (legacy).
-3. **Apply Passcode Theme**. Turn **Bold Text OFF** (Settings → Display & Brightness) or iOS ignores keypad bitmaps.
+3. **Apply Passcode Theme**. Regular and **Bold Text** caches (`--white.png` and `--white-bold.png`) are both written.
+4. Lock the phone. Bold Text can stay ON.
 
 ## Troubleshooting
 

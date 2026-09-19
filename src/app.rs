@@ -8,10 +8,15 @@ use eframe::egui;
 
 use crate::apple;
 use crate::device::{DeviceInfo, list_connected_devices};
-use crate::flasher::{flash_passcode_theme, flash_wallet_skin};
+use crate::flasher::{WalletArt, flash_passcode_theme, flash_wallet_skin, load_previous_png};
+use crate::host_guard;
+use crate::i18n::{self, Lang, save_settings};
 use crate::image_skin::PreparedSkin;
+use crate::keypad::{load_individual_keys, slice_poster, sliced_to_passthm_items};
 use crate::passthm::{PasscodeTheme, parse_passthm_file};
-use crate::scanner::{SavedCard, load_saved_cards, scan_syslog_for_cards};
+use crate::scanner::{
+    SavedCard, load_saved_cards, rename_card, scan_syslog_for_cards, set_card_last_image,
+};
 
 #[derive(PartialEq, Eq)]
 enum AppTab {
@@ -83,6 +88,19 @@ pub struct AirCardApp {
     forced_telephony_ver: String,
     keypad_language: String,
     keypad_textures: Vec<(String, egui::TextureHandle)>,
+    poster_zoom: f32,
+    poster_pan_x: f32,
+    poster_pan_y: f32,
+    sliced_keys: Option<std::collections::HashMap<String, Vec<u8>>>,
+
+    lang: Lang,
+    card_name_edit: String,
+    crop_zoom: f32,
+    crop_pan_x: f32,
+    crop_pan_y: f32,
+    pdf_bytes: Option<Vec<u8>>,
+    blocking_apps: Vec<String>,
+    last_guard_check: std::time::Instant,
 
     // Worker thread & progress
     is_busy: bool,
@@ -105,6 +123,7 @@ impl AirCardApp {
             Err(err) => (false, err.to_string()),
         };
 
+        let settings = i18n::load_settings();
         let mut app = Self {
             current_tab: AppTab::Wallet,
             apple_status,
@@ -126,6 +145,19 @@ impl AirCardApp {
             forced_telephony_ver: "Auto (TelephonyUI-10)".to_string(),
             keypad_language: "Russian (Русский)".to_string(),
             keypad_textures: Vec::new(),
+            poster_zoom: 1.0,
+            poster_pan_x: 0.0,
+            poster_pan_y: 0.0,
+            sliced_keys: None,
+
+            lang: settings.lang,
+            card_name_edit: String::new(),
+            crop_zoom: 1.0,
+            crop_pan_x: 0.0,
+            crop_pan_y: 0.0,
+            pdf_bytes: None,
+            blocking_apps: host_guard::blocking_sync_apps(),
+            last_guard_check: std::time::Instant::now(),
 
             is_busy: false,
             progress_step: 0,
@@ -137,7 +169,7 @@ impl AirCardApp {
             show_logs_window: false,
         };
 
-        app.add_log("AirCard Windows v1.2.1 initialized");
+        app.add_log("AirCard Windows v1.3.0 initialized");
         app.add_log(format!("Apple Support Runtime: {}", if app.apple_ready { "Loaded and operational" } else { "Not found (iTunes required)" }));
         app.add_log(format!("Loaded {} saved card(s) from database", app.saved_cards.len()));
 
@@ -184,16 +216,53 @@ impl AirCardApp {
         }
     }
 
-    fn select_skin(&mut self, ctx: &egui::Context) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
-            .pick_file()
-        else {
-            return;
-        };
+    fn refresh_guard(&mut self) {
+        self.blocking_apps = host_guard::blocking_sync_apps();
+        self.last_guard_check = std::time::Instant::now();
+        if !self.blocking_apps.is_empty() {
+            self.add_log(format!(
+                "Quit {} before flashing — they steal the AirTraffic session",
+                self.blocking_apps.join(", ")
+            ));
+        }
+    }
 
+    fn cycle_lang(&mut self) {
+        self.lang = self.lang.cycle();
+        save_settings(&i18n::Settings { lang: self.lang });
+    }
+
+    fn apply_skin_path(&mut self, ctx: &egui::Context, path: PathBuf) {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if ext == "pdf" {
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    self.add_log(format!(
+                        "Loaded PDF artwork: {} ({:.1} KB) — written as cardBackgroundCombined.pdf",
+                        path.display(),
+                        bytes.len() as f32 / 1024.0
+                    ));
+                    self.pdf_bytes = Some(bytes);
+                    self.skin = None;
+                    self.skin_texture = None;
+                    self.source_path = Some(path);
+                    self.status_msg = "PDF artwork ready (Suica / transit).".to_string();
+                }
+                Err(err) => {
+                    self.status_msg = format!("Could not read PDF: {err}");
+                }
+            }
+            return;
+        }
+
+        self.pdf_bytes = None;
         self.add_log(format!("Opening skin image: {}", path.display()));
-        match PreparedSkin::from_path(&path) {
+        match PreparedSkin::from_path_framed(&path, self.crop_zoom, self.crop_pan_x, self.crop_pan_y)
+        {
             Ok(skin) => {
                 self.add_log(format!(
                     "Skin processed: source {}x{} resampled to 1536x969 PNG ({:.1} KB)",
@@ -221,6 +290,60 @@ impl AirCardApp {
                 self.status_msg = format!("Could not prepare image: {error:#}");
             }
         }
+    }
+
+    fn reframe_skin(&mut self, ctx: &egui::Context) {
+        if self.pdf_bytes.is_some() {
+            return;
+        }
+        let Some(path) = self.source_path.clone() else {
+            return;
+        };
+        if let Ok(skin) =
+            PreparedSkin::from_path_framed(&path, self.crop_zoom, self.crop_pan_x, self.crop_pan_y)
+        {
+            self.skin_texture = Some(ctx.load_texture(
+                "card-skin-preview",
+                skin.preview.clone(),
+                egui::TextureOptions::LINEAR,
+            ));
+            self.skin = Some(skin);
+        }
+    }
+
+    fn select_skin(&mut self, ctx: &egui::Context) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Artwork", &["png", "jpg", "jpeg", "webp", "pdf"])
+            .pick_file()
+        else {
+            return;
+        };
+        self.crop_zoom = 1.0;
+        self.crop_pan_x = 0.0;
+        self.crop_pan_y = 0.0;
+        self.apply_skin_path(ctx, path);
+    }
+
+    fn reapply_last_image(&mut self, ctx: &egui::Context) {
+        let path = self
+            .saved_cards
+            .iter()
+            .find(|c| c.hash == self.card_hash)
+            .and_then(|c| c.last_image.clone());
+        let Some(path) = path else {
+            self.status_msg = "No last image saved for this card.".to_string();
+            return;
+        };
+        self.apply_skin_path(ctx, PathBuf::from(path));
+    }
+
+    fn persist_card_name(&mut self) {
+        let hash = self.card_hash.trim().to_string();
+        if hash.is_empty() || self.card_name_edit.trim().is_empty() {
+            return;
+        }
+        rename_card(&hash, &self.card_name_edit);
+        self.saved_cards = load_saved_cards();
     }
 
     fn save_prepared_png(&mut self) {
@@ -303,12 +426,42 @@ impl AirCardApp {
             return;
         }
         let Some(skin) = self.skin.as_ref() else {
-            self.add_log("Flash failed: No skin image prepared.");
-            self.status_msg = "Please choose a card skin image first.".to_string();
+            if self.pdf_bytes.is_none() {
+                self.add_log("Flash failed: No skin image prepared.");
+                self.status_msg = "Please choose a card skin image first.".to_string();
+                return;
+            }
+            self.start_wallet_flash(udid, hash, WalletArt::Pdf(self.pdf_bytes.clone().unwrap()));
             return;
         };
 
         let png_bytes = skin.png.clone();
+        if let Some(path) = &self.source_path {
+            set_card_last_image(&hash, path);
+            self.saved_cards = load_saved_cards();
+        }
+        self.start_wallet_flash(udid, hash, WalletArt::Png(png_bytes));
+    }
+
+    fn revert_card(&mut self) {
+        let Some(udid) = self.selected_udid.clone() else {
+            self.status_msg = "Please select a connected iPhone.".to_string();
+            return;
+        };
+        let hash = self.card_hash.trim().to_string();
+        if hash.is_empty() {
+            self.status_msg = "Please enter or scan a target card hash.".to_string();
+            return;
+        }
+        let Some(png) = load_previous_png(&hash) else {
+            self.status_msg = "No previous AirCard skin stored for this card.".to_string();
+            self.add_log("Revert skipped: apply a skin twice to keep a previous copy.");
+            return;
+        };
+        self.start_wallet_flash(udid, hash, WalletArt::Png(png));
+    }
+
+    fn start_wallet_flash(&mut self, udid: String, hash: String, art: WalletArt) {
         if let Some(ref flag) = self.scan_stop_flag {
             flag.store(true, std::sync::atomic::Ordering::Relaxed);
         }
@@ -319,6 +472,7 @@ impl AirCardApp {
         self.progress_msg = "Initiating card flash...".to_string();
         self.status_msg = "Writing card skin to iPhone...".to_string();
         self.add_log(format!("Starting card skin flash for hash: {} (UDID: {})", hash, udid));
+        self.refresh_guard();
 
         let (tx, rx) = channel();
         self.task_rx = Some(rx);
@@ -329,7 +483,7 @@ impl AirCardApp {
             let res = flash_wallet_skin(
                 &udid,
                 &hash,
-                &png_bytes,
+                &art,
                 move |step, total, msg| {
                     let _ = tx_progress.send(BackgroundTaskMessage::Progress {
                         step,
@@ -419,6 +573,114 @@ impl AirCardApp {
         }
     }
 
+    fn telephony_target(&self) -> &'static str {
+        match self.forced_telephony_ver.as_str() {
+            "TelephonyUI-9" => "TelephonyUI-9",
+            "TelephonyUI-8" => "TelephonyUI-8",
+            _ => "TelephonyUI-10",
+        }
+    }
+
+    fn set_sliced_preview(
+        &mut self,
+        ctx: &egui::Context,
+        keys: std::collections::HashMap<String, Vec<u8>>,
+    ) {
+        self.keypad_textures.clear();
+        for (digit, bytes) in &keys {
+            if let Ok(img) = image::load_from_memory(bytes) {
+                let rgba = img.to_rgba8();
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                    [rgba.width() as usize, rgba.height() as usize],
+                    &rgba,
+                );
+                let tex = ctx.load_texture(
+                    format!("keypad-{}", digit),
+                    color_image,
+                    egui::TextureOptions::LINEAR,
+                );
+                self.keypad_textures.push((digit.clone(), tex));
+            }
+        }
+        self.keypad_textures.sort_by(|a, b| a.0.cmp(&b.0));
+        self.sliced_keys = Some(keys);
+        let items = sliced_to_passthm_items(
+            self.sliced_keys.as_ref().unwrap(),
+            self.telephony_target(),
+        );
+        self.loaded_theme = Some(PasscodeTheme {
+            name: "PosterSlice".into(),
+            detected_version: self.telephony_target().into(),
+            items,
+            key_previews: self.sliced_keys.clone().unwrap_or_default(),
+        });
+        self.status_msg = format!(
+            "Sliced keypad: {} keys, {} cache files (incl. Bold Text)",
+            self.keypad_textures.len(),
+            self.loaded_theme.as_ref().map(|t| t.items.len()).unwrap_or(0)
+        );
+    }
+
+    fn select_poster(&mut self, ctx: &egui::Context) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
+            .pick_file()
+        else {
+            return;
+        };
+        match image::open(&path) {
+            Ok(img) => match slice_poster(&img, self.poster_zoom, self.poster_pan_x, self.poster_pan_y)
+            {
+                Ok(keys) => {
+                    self.add_log(format!("Poster-sliced 10 keypad buttons from {}", path.display()));
+                    self.set_sliced_preview(ctx, keys);
+                    self.theme_path = Some(path);
+                }
+                Err(err) => {
+                    self.status_msg = format!("Slice failed: {err:#}");
+                }
+            },
+            Err(err) => {
+                self.status_msg = format!("Could not open wallpaper: {err}");
+            }
+        }
+    }
+
+    fn reslice_poster(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.theme_path.clone() else {
+            return;
+        };
+        if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("passthm") || e.eq_ignore_ascii_case("zip"))
+        {
+            return;
+        }
+        if let Ok(img) = image::open(&path) {
+            if let Ok(keys) = slice_poster(&img, self.poster_zoom, self.poster_pan_x, self.poster_pan_y)
+            {
+                self.set_sliced_preview(ctx, keys);
+            }
+        }
+    }
+
+    fn select_key_folder(&mut self, ctx: &egui::Context) {
+        let Some(dir) = rfd::FileDialog::new().pick_folder() else {
+            return;
+        };
+        match load_individual_keys(&dir) {
+            Ok(keys) => {
+                self.add_log(format!("Loaded 0.png…9.png from {}", dir.display()));
+                self.set_sliced_preview(ctx, keys);
+                self.theme_path = Some(dir);
+            }
+            Err(err) => {
+                self.status_msg = format!("{err:#}");
+            }
+        }
+    }
+
     fn flash_theme(&mut self) {
         let Some(udid) = self.selected_udid.clone() else {
             self.add_log("Theme flash failed: No connected iPhone selected.");
@@ -438,6 +700,7 @@ impl AirCardApp {
         self.progress_msg = "Starting passcode theme flash...".to_string();
         self.status_msg = "Writing passcode theme buttons...".to_string();
         self.add_log(format!("Flashing passcode theme '{}' ({} button assets) to device {}", theme.name, items.len(), udid));
+        self.refresh_guard();
 
         let (tx, rx) = channel();
         self.task_rx = Some(rx);
@@ -498,6 +761,9 @@ impl AirCardApp {
                 BackgroundTaskMessage::CardFound { hash, name } => {
                     self.card_hash = hash.clone();
                     self.saved_cards = load_saved_cards();
+                    if let Some(card) = self.saved_cards.iter().find(|c| c.hash == hash) {
+                        self.card_name_edit = card.name.clone();
+                    }
                     let msg_str = format!("Card captured: {} ({})", name, hash);
                     self.add_log(&msg_str);
                     self.status_msg = msg_str;
@@ -676,9 +942,16 @@ impl eframe::App for AirCardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_messages();
 
+        if self.last_guard_check.elapsed().as_secs() >= 3 {
+            self.blocking_apps = host_guard::blocking_sync_apps();
+            self.last_guard_check = std::time::Instant::now();
+        }
+
         if self.is_busy || self.scanning_syslog {
             ctx.request_repaint();
         }
+
+        let t = i18n::t(self.lang);
 
         // Top bar
         egui::TopBottomPanel::top("header")
@@ -696,19 +969,23 @@ impl eframe::App for AirCardApp {
                             .color(md3::ON_SURFACE),
                     );
                     ui.label(
-                        egui::RichText::new("v1.2.1")
+                        egui::RichText::new("v1.3.0")
                             .size(11.0)
                             .color(md3::ON_SURFACE_VARIANT),
                     );
 
                     ui.add_space(20.0);
-                    m3_tab(ui, &mut self.current_tab, AppTab::Wallet, "Wallet");
-                    m3_tab(ui, &mut self.current_tab, AppTab::Passcode, "Passcode");
-                    m3_tab(ui, &mut self.current_tab, AppTab::Help, "Help");
+                    m3_tab(ui, &mut self.current_tab, AppTab::Wallet, t.wallet);
+                    m3_tab(ui, &mut self.current_tab, AppTab::Passcode, t.passcode);
+                    m3_tab(ui, &mut self.current_tab, AppTab::Help, t.help);
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if m3_button_outlined(ui, self.lang.code()) {
+                            self.cycle_lang();
+                        }
                         if m3_button_outlined(ui, "Refresh") {
                             self.refresh_devices();
+                            self.refresh_guard();
                         }
                         ui.add_space(4.0);
                         let has_device = !self.devices.is_empty();
@@ -721,7 +998,7 @@ impl eframe::App for AirCardApp {
                             ui.label(egui::RichText::new(name).size(12.0).color(md3::ON_SURFACE))
                                 .on_hover_text(&self.apple_status);
                         } else {
-                            ui.label(egui::RichText::new("No device").size(12.0).color(md3::ON_SURFACE_VARIANT))
+                            ui.label(egui::RichText::new(t.no_device).size(12.0).color(md3::ON_SURFACE_VARIANT))
                                 .on_hover_text(&self.apple_status);
                         }
                     });
@@ -749,7 +1026,11 @@ impl eframe::App for AirCardApp {
                     ui.label(egui::RichText::new(&self.status_msg).size(11.5).color(md3::ON_SURFACE_VARIANT));
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let btn_text = if self.show_logs_window { "Logs [x]" } else { "Logs" };
+                        let btn_text = if self.show_logs_window {
+                            format!("{} [x]", t.logs)
+                        } else {
+                            t.logs.to_string()
+                        };
                         let btn = egui::Button::new(
                             egui::RichText::new(btn_text).size(11.0).color(
                                 if self.show_logs_window { md3::ON_PRIMARY_CONTAINER } else { md3::ON_SURFACE_VARIANT }
@@ -774,6 +1055,22 @@ impl eframe::App for AirCardApp {
             )
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    if !self.blocking_apps.is_empty() {
+                        let warn = i18n::t(self.lang).itunes_warn;
+                        let apps = self.blocking_apps.join(", ");
+                        egui::Frame::new()
+                            .fill(md3::ERROR_CONTAINER)
+                            .corner_radius(12)
+                            .inner_margin(egui::Margin::same(12))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(format!("{warn} ({apps})"))
+                                        .size(12.0)
+                                        .color(md3::ERROR),
+                                );
+                            });
+                        ui.add_space(8.0);
+                    }
                     match self.current_tab {
                         AppTab::Wallet => self.show_wallet_tab(ctx, ui),
                         AppTab::Passcode => self.show_passcode_tab(ctx, ui),
@@ -785,7 +1082,7 @@ impl eframe::App for AirCardApp {
         let mut show_logs = self.show_logs_window;
         let mut file_saved_msg: Option<String> = None;
         if show_logs {
-            egui::Window::new("Logs")
+            egui::Window::new(i18n::t(self.lang).logs)
                 .open(&mut show_logs)
                 .default_size([540.0, 300.0])
                 .min_size([360.0, 180.0])
@@ -849,6 +1146,7 @@ impl eframe::App for AirCardApp {
 
 impl AirCardApp {
     fn show_wallet_tab(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        let t = i18n::t(self.lang);
         if self.scanning_syslog {
             egui::Frame::new()
                 .fill(md3::TERTIARY_CONTAINER)
@@ -858,11 +1156,11 @@ impl AirCardApp {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.vertical(|ui| {
-                            ui.label(egui::RichText::new("Scanning syslog...").strong().size(13.0).color(md3::ON_TERTIARY_CONTAINER));
-                            ui.label(egui::RichText::new("Open Wallet on iPhone and tap your card").size(11.5).color(md3::ON_TERTIARY_CONTAINER));
+                            ui.label(egui::RichText::new(t.scanning).strong().size(13.0).color(md3::ON_TERTIARY_CONTAINER));
+                            ui.label(egui::RichText::new(t.scanning_hint).size(11.5).color(md3::ON_TERTIARY_CONTAINER));
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let btn = egui::Button::new(egui::RichText::new("Stop").size(12.0).color(md3::ON_SURFACE))
+                            let btn = egui::Button::new(egui::RichText::new(t.stop).size(12.0).color(md3::ON_SURFACE))
                                 .fill(md3::ERROR_CONTAINER).corner_radius(20).stroke(egui::Stroke::NONE);
                             if ui.add(btn).clicked() { self.toggle_syslog_scan(); }
                         });
@@ -874,20 +1172,19 @@ impl AirCardApp {
         ui.columns(2, |cols| {
             let left = &mut cols[0];
             m3_card(left, |ui| {
-                ui.label(egui::RichText::new("Card Configuration").strong().size(16.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(t.card_config).strong().size(16.0).color(md3::ON_SURFACE));
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new("Target your card and choose replacement artwork").size(12.0).color(md3::ON_SURFACE_VARIANT));
+                ui.label(egui::RichText::new(t.card_config_sub).size(12.0).color(md3::ON_SURFACE_VARIANT));
                 ui.add_space(16.0);
 
-                // Target Card Hash
-                ui.label(egui::RichText::new("Target Card Hash").strong().size(12.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(t.target_hash).strong().size(12.0).color(md3::ON_SURFACE));
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     let btn_w = 90.0;
                     let text_w = (ui.available_width() - btn_w - 12.0).max(150.0);
                     ui.add(egui::TextEdit::singleline(&mut self.card_hash).hint_text("Base64 pass hash...").desired_width(text_w));
 
-                    let scan_label = if self.scanning_syslog { "Stop" } else { "Scan" };
+                    let scan_label = if self.scanning_syslog { t.stop } else { t.scan };
                     let scan_bg = if self.scanning_syslog { md3::ERROR_CONTAINER } else { md3::PRIMARY_CONTAINER };
                     let scan_fg = if self.scanning_syslog { md3::ERROR } else { md3::ON_PRIMARY_CONTAINER };
                     let scan_btn = egui::Button::new(egui::RichText::new(scan_label).size(12.0).color(scan_fg))
@@ -897,56 +1194,83 @@ impl AirCardApp {
 
                 if !self.saved_cards.is_empty() {
                     ui.add_space(8.0);
-                    ui.label(egui::RichText::new("Saved cards").size(11.0).color(md3::ON_SURFACE_VARIANT));
+                    ui.label(egui::RichText::new(t.saved_cards).size(11.0).color(md3::ON_SURFACE_VARIANT));
                     ui.add_space(2.0);
                     let combo_w = (ui.available_width() - 4.0).max(150.0);
+                    let mut picked: Option<String> = None;
                     egui::ComboBox::from_id_salt("saved_cards_box")
                         .width(combo_w)
                         .selected_text(
                             self.saved_cards.iter()
                                 .find(|c| c.hash == self.card_hash)
                                 .map(|c| format!("{} ({})", c.name, &c.hash[..8.min(c.hash.len())]))
-                                .unwrap_or_else(|| "Select...".into()),
+                                .unwrap_or_else(|| t.select.into()),
                         )
                         .show_ui(ui, |ui| {
                             for card in &self.saved_cards {
                                 let label = format!("{} ({}...)", card.name, &card.hash[..8.min(card.hash.len())]);
                                 if ui.selectable_label(self.card_hash == card.hash, label).clicked() {
-                                    self.card_hash = card.hash.clone();
+                                    picked = Some(card.hash.clone());
                                 }
                             }
                         });
+                    if let Some(hash) = picked {
+                        self.card_hash = hash.clone();
+                        if let Some(card) = self.saved_cards.iter().find(|c| c.hash == hash) {
+                            self.card_name_edit = card.name.clone();
+                        }
+                    }
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.card_name_edit).hint_text(t.rename).desired_width(160.0));
+                        if m3_button_tonal(ui, t.rename) {
+                            self.persist_card_name();
+                        }
+                        if m3_button_outlined(ui, t.reapply) {
+                            self.reapply_last_image(ctx);
+                        }
+                    });
                 }
 
                 ui.add_space(16.0);
 
-                // Card Skin
-                ui.label(egui::RichText::new("Card Skin Artwork").strong().size(12.0).color(md3::ON_SURFACE));
-                ui.label(egui::RichText::new("PNG, JPG, WebP - auto-scaled to 1536x969").size(11.0).color(md3::ON_SURFACE_VARIANT));
+                ui.label(egui::RichText::new(t.artwork).strong().size(12.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(t.artwork_sub).size(11.0).color(md3::ON_SURFACE_VARIANT));
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    if m3_button_filled(ui, "Choose Image...") { self.select_skin(ctx); }
+                    if m3_button_filled(ui, t.choose_image) { self.select_skin(ctx); }
                     if self.skin.is_some() {
-                        if m3_button_tonal(ui, "Export PNG") { self.save_prepared_png(); }
+                        if m3_button_tonal(ui, t.export_png) { self.save_prepared_png(); }
                     }
                 });
 
-                if let Some(skin) = &self.skin {
+                if self.pdf_bytes.is_some() {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("PDF → cardBackgroundCombined.pdf").size(11.0).color(md3::PRIMARY));
+                } else if let Some(skin) = &self.skin {
                     ui.add_space(4.0);
                     let fname = self.source_path.as_ref()
                         .and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("image");
                     ui.label(egui::RichText::new(format!("{} - 1536x969 - {:.0} KB", fname, skin.png.len() as f32 / 1024.0)).size(11.0).color(md3::PRIMARY));
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new(t.crop).size(11.0).color(md3::ON_SURFACE_VARIANT));
+                    let mut crop_changed = false;
+                    crop_changed |= ui.add(egui::Slider::new(&mut self.crop_zoom, 1.0..=2.5).text(t.zoom)).changed();
+                    crop_changed |= ui.add(egui::Slider::new(&mut self.crop_pan_x, -1.0..=1.0).text(t.pan_x)).changed();
+                    crop_changed |= ui.add(egui::Slider::new(&mut self.crop_pan_y, -1.0..=1.0).text(t.pan_y)).changed();
+                    if crop_changed {
+                        self.reframe_skin(ctx);
+                    }
                 }
 
                 ui.add_space(16.0);
 
-                // Apply
-                ui.label(egui::RichText::new("Write to iPhone").strong().size(12.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(t.write_iphone).strong().size(12.0).color(md3::ON_SURFACE));
                 ui.add_space(4.0);
 
-                let can_flash = !self.is_busy && self.selected_udid.is_some() && !self.card_hash.trim().is_empty() && self.skin.is_some();
+                let can_flash = !self.is_busy && self.selected_udid.is_some() && !self.card_hash.trim().is_empty() && (self.skin.is_some() || self.pdf_bytes.is_some());
                 let flash_btn = egui::Button::new(
-                    egui::RichText::new("Apply Card Skin").strong().size(14.0)
+                    egui::RichText::new(t.apply_skin).strong().size(14.0)
                         .color(if can_flash { md3::ON_PRIMARY } else { md3::ON_SURFACE_VARIANT }),
                 )
                 .fill(if can_flash { md3::PRIMARY } else { md3::SURFACE_CONTAINER_HIGH })
@@ -959,8 +1283,14 @@ impl AirCardApp {
                     let mut r = Vec::new();
                     if self.selected_udid.is_none() { r.push("connect iPhone"); }
                     if self.card_hash.trim().is_empty() { r.push("enter card hash"); }
-                    if self.skin.is_none() { r.push("choose image"); }
+                    if self.skin.is_none() && self.pdf_bytes.is_none() { r.push("choose image"); }
                     if !r.is_empty() { resp.on_disabled_hover_text(format!("Need: {}", r.join(", "))); }
+                }
+
+                ui.add_space(6.0);
+                let can_revert = !self.is_busy && self.selected_udid.is_some() && !self.card_hash.trim().is_empty();
+                if ui.add_enabled(can_revert, egui::Button::new(egui::RichText::new(t.revert).size(12.0).color(md3::ON_SECONDARY_CONTAINER)).fill(md3::SECONDARY_CONTAINER).corner_radius(20).stroke(egui::Stroke::NONE)).clicked() {
+                    self.revert_card();
                 }
 
                 if self.is_busy {
@@ -972,10 +1302,9 @@ impl AirCardApp {
                 }
             });
 
-            // Right: preview
             let right = &mut cols[1];
             m3_card(right, |ui| {
-                ui.label(egui::RichText::new("Wallet Preview").strong().size(16.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(t.preview).strong().size(16.0).color(md3::ON_SURFACE));
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new("1536 x 969 px pass canvas").size(12.0).color(md3::ON_SURFACE_VARIANT));
                 ui.add_space(12.0);
@@ -992,6 +1321,10 @@ impl AirCardApp {
                         painter.rect_stroke(rect, 16.0,
                             egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(255, 255, 255, 30)),
                             egui::StrokeKind::Inside);
+                    } else if self.pdf_bytes.is_some() {
+                        painter.rect_filled(rect, 16.0, md3::SURFACE_CONTAINER_HIGH);
+                        painter.text(rect.center(), egui::Align2::CENTER_CENTER,
+                            "PDF artwork", egui::FontId::proportional(14.0), md3::PRIMARY);
                     } else {
                         painter.rect_filled(rect, 16.0, md3::SURFACE_CONTAINER_HIGH);
                         painter.text(rect.center(), egui::Align2::CENTER_CENTER,
@@ -1005,33 +1338,33 @@ impl AirCardApp {
                     ui.label(egui::RichText::new("|").size(11.0).color(md3::OUTLINE_VARIANT));
                     ui.label(egui::RichText::new("1.585 ratio").size(11.0).color(md3::ON_SURFACE_VARIANT));
                     ui.label(egui::RichText::new("|").size(11.0).color(md3::OUTLINE_VARIANT));
-                    if self.skin.is_some() {
-                        ui.label(egui::RichText::new("Ready").size(11.0).color(md3::SUCCESS));
+                    if self.skin.is_some() || self.pdf_bytes.is_some() {
+                        ui.label(egui::RichText::new(t.ready).size(11.0).color(md3::SUCCESS));
                     } else {
                         ui.label(egui::RichText::new("No image").size(11.0).color(md3::ON_SURFACE_VARIANT));
                     }
                 });
                 ui.add_space(8.0);
-                ui.label(egui::RichText::new("After applying, force close Apple Wallet and reopen it.").size(11.0).color(md3::ON_SURFACE_VARIANT));
+                ui.label(egui::RichText::new(t.force_close).size(11.0).color(md3::ON_SURFACE_VARIANT));
             });
         });
     }
 
     fn show_passcode_tab(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        let t = i18n::t(self.lang);
         ui.columns(2, |cols| {
             // Left: config
             let left = &mut cols[0];
             m3_card(left, |ui| {
-                ui.label(egui::RichText::new("Passcode Theme").strong().size(16.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(t.theme_title).strong().size(16.0).color(md3::ON_SURFACE));
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new("Custom lockscreen keypad from Cowabunga or Nugget").size(12.0).color(md3::ON_SURFACE_VARIANT));
+                ui.label(egui::RichText::new(t.theme_sub).size(12.0).color(md3::ON_SURFACE_VARIANT));
                 ui.add_space(16.0);
 
-                // Theme file
                 ui.label(egui::RichText::new("Theme Package").strong().size(12.0).color(md3::ON_SURFACE));
                 ui.label(egui::RichText::new("Choose a .passthm archive containing dialer artwork").size(11.0).color(md3::ON_SURFACE_VARIANT));
                 ui.add_space(4.0);
-                if m3_button_filled(ui, "Choose .passthm...") { self.select_theme_file(ctx); }
+                if m3_button_filled(ui, t.choose_passthm) { self.select_theme_file(ctx); }
 
                 if let Some(theme) = &self.loaded_theme {
                     let fname = self.theme_path.as_ref()
@@ -1040,10 +1373,28 @@ impl AirCardApp {
                     ui.label(egui::RichText::new(format!("{} - {} assets", fname, theme.items.len())).size(11.0).color(md3::PRIMARY));
                 }
 
+                ui.add_space(12.0);
+                ui.label(egui::RichText::new(t.creator).strong().size(12.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(t.poster).size(11.0).color(md3::ON_SURFACE_VARIANT));
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if m3_button_tonal(ui, t.slice_wallpaper) { self.select_poster(ctx); }
+                    if m3_button_outlined(ui, "0.png…9.png") { self.select_key_folder(ctx); }
+                });
+                if self.sliced_keys.is_some() {
+                    ui.add_space(4.0);
+                    let mut slice_changed = false;
+                    slice_changed |= ui.add(egui::Slider::new(&mut self.poster_zoom, 1.0..=2.5).text(t.zoom)).changed();
+                    slice_changed |= ui.add(egui::Slider::new(&mut self.poster_pan_x, -1.0..=1.0).text(t.pan_x)).changed();
+                    slice_changed |= ui.add(egui::Slider::new(&mut self.poster_pan_y, -1.0..=1.0).text(t.pan_y)).changed();
+                    if slice_changed {
+                        self.reslice_poster(ctx);
+                    }
+                }
+
                 ui.add_space(16.0);
 
-                // iOS version
-                ui.label(egui::RichText::new("Target iOS Cache").strong().size(12.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(t.ios_cache).strong().size(12.0).color(md3::ON_SURFACE));
                 ui.label(egui::RichText::new("Select cache format based on connected iOS version").size(11.0).color(md3::ON_SURFACE_VARIANT));
                 ui.add_space(4.0);
                 let combo_w = (ui.available_width() - 4.0).max(150.0);
@@ -1067,7 +1418,7 @@ impl AirCardApp {
                 ui.add_space(16.0);
 
                 // Keypad Language
-                ui.label(egui::RichText::new("Keypad Language").strong().size(12.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(t.keypad_lang).strong().size(12.0).color(md3::ON_SURFACE));
                 ui.label(egui::RichText::new("Subtext alphabet layout (Russian Cyrillic, English, Ukrainian, or Universal)").size(11.0).color(md3::ON_SURFACE_VARIANT));
                 ui.add_space(4.0);
                 let mut lang_changed = false;
@@ -1090,12 +1441,12 @@ impl AirCardApp {
                 ui.add_space(16.0);
 
                 // Apply
-                ui.label(egui::RichText::new("Write to iPhone").strong().size(12.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(t.write_iphone).strong().size(12.0).color(md3::ON_SURFACE));
                 ui.add_space(4.0);
 
                 let can_flash = !self.is_busy && self.selected_udid.is_some() && self.loaded_theme.is_some();
                 let flash_btn = egui::Button::new(
-                    egui::RichText::new("Apply Passcode Theme").strong().size(14.0)
+                    egui::RichText::new(t.apply_passcode).strong().size(14.0)
                         .color(if can_flash { md3::ON_PRIMARY } else { md3::ON_SURFACE_VARIANT }),
                 )
                 .fill(if can_flash { md3::PRIMARY } else { md3::SURFACE_CONTAINER_HIGH })
@@ -1104,6 +1455,9 @@ impl AirCardApp {
 
                 let resp = ui.add_enabled(can_flash, flash_btn);
                 if resp.clicked() { self.flash_theme(); }
+                if self.sliced_keys.is_some() {
+                    ui.label(egui::RichText::new(t.flash_sliced).size(11.0).color(md3::ON_SURFACE_VARIANT));
+                }
                 if !can_flash {
                     let mut r = Vec::new();
                     if self.selected_udid.is_none() { r.push("connect iPhone"); }
@@ -1175,7 +1529,7 @@ impl AirCardApp {
                     }
                 });
                 ui.add_space(8.0);
-                ui.label(egui::RichText::new("After applying, lock your iPhone to see the new keypad.").size(11.0).color(md3::ON_SURFACE_VARIANT));
+                ui.label(egui::RichText::new(t.bold_note).size(11.0).color(md3::ON_SURFACE_VARIANT));
             });
         });
     }

@@ -23,6 +23,8 @@ const SO_RCVTIMEO: i32 = 0x1006;
 pub struct SavedCard {
     pub hash: String,
     pub name: String,
+    #[serde(default)]
+    pub last_image: Option<String>,
 }
 
 pub fn get_cards_storage_path() -> PathBuf {
@@ -171,6 +173,35 @@ pub fn add_or_update_card(hash: &str, name: &str) {
             } else {
                 name.to_string()
             },
+            last_image: None,
+        });
+    }
+    save_saved_cards(&cards);
+}
+
+pub fn rename_card(hash: &str, name: &str) {
+    if !is_valid_card_hash(hash) || name.trim().is_empty() {
+        return;
+    }
+    let mut cards = load_saved_cards();
+    if let Some(existing) = cards.iter_mut().find(|c| c.hash == hash) {
+        existing.name = name.trim().to_string();
+        save_saved_cards(&cards);
+    }
+}
+
+pub fn set_card_last_image(hash: &str, path: &std::path::Path) {
+    if !is_valid_card_hash(hash) {
+        return;
+    }
+    let mut cards = load_saved_cards();
+    if let Some(existing) = cards.iter_mut().find(|c| c.hash == hash) {
+        existing.last_image = Some(path.to_string_lossy().into_owned());
+    } else {
+        cards.push(SavedCard {
+            hash: hash.to_string(),
+            name: format!("Card {}", cards.len() + 1),
+            last_image: Some(path.to_string_lossy().into_owned()),
         });
     }
     save_saved_cards(&cards);

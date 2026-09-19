@@ -17,6 +17,12 @@ pub const TARGET_WALLET_ASSETS: &[&str] = &[
     "cardBackgroundCombined@2x.png",
 ];
 
+pub const TARGET_WALLET_PDF: &[&str] = &[
+    "cardBackgroundCombined.pdf",
+    "cardBackgroundCombined@2x.pdf",
+    "cardBackgroundCombined@3x.pdf",
+];
+
 pub const CACHE_FILES: &[&str] = &[
     "FrontFace",
     "PlaceHolder",
@@ -44,6 +50,40 @@ pub fn generate_token() -> String {
         );
     }
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+#[derive(Clone)]
+pub enum WalletArt {
+    Png(Vec<u8>),
+    Pdf(Vec<u8>),
+}
+
+fn skin_backup_dir(card_hash: &str) -> std::path::PathBuf {
+    let local = std::env::var("LOCALAPPDATA")
+        .unwrap_or_else(|_| r"C:\Users\Default\AppData\Local".to_string());
+    let safe: String = card_hash
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let dir = std::path::PathBuf::from(local)
+        .join("AirCard")
+        .join("skins")
+        .join(safe);
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+pub fn remember_applied_png(card_hash: &str, png: &[u8]) {
+    let dir = skin_backup_dir(card_hash);
+    let current = dir.join("current.png");
+    if current.exists() {
+        let _ = std::fs::copy(&current, dir.join("previous.png"));
+    }
+    let _ = std::fs::write(current, png);
+}
+
+pub fn load_previous_png(card_hash: &str) -> Option<Vec<u8>> {
+    std::fs::read(skin_backup_dir(card_hash).join("previous.png")).ok()
 }
 
 struct StagedAsset {
@@ -234,7 +274,7 @@ where
 pub fn flash_wallet_skin<F, L>(
     udid: &str,
     card_hash: &str,
-    skin_png: &[u8],
+    art: &WalletArt,
     mut progress: F,
     mut log: L,
 ) -> Result<()>
@@ -245,11 +285,21 @@ where
     let pkpass_dir = format!("/var/mobile/Library/Passes/Cards/{}.pkpass", card_hash);
 
     log(&format!("Target Card Hash: {}", card_hash));
-    log(&format!("Skin payload size: {} bytes PNG", skin_png.len()));
 
     let mut items: Vec<(String, String, Vec<u8>)> = Vec::new();
-    for asset in TARGET_WALLET_ASSETS {
-        items.push((pkpass_dir.clone(), (*asset).to_string(), skin_png.to_vec()));
+    match art {
+        WalletArt::Png(png) => {
+            log(&format!("Skin payload size: {} bytes PNG", png.len()));
+            for asset in TARGET_WALLET_ASSETS {
+                items.push((pkpass_dir.clone(), (*asset).to_string(), png.clone()));
+            }
+        }
+        WalletArt::Pdf(pdf) => {
+            log(&format!("Skin payload size: {} bytes PDF (Suica / transit artwork)", pdf.len()));
+            for asset in TARGET_WALLET_PDF {
+                items.push((pkpass_dir.clone(), (*asset).to_string(), pdf.clone()));
+            }
+        }
     }
     for ext in [".cache", ".pkcache"] {
         let cache_dir = format!("/var/mobile/Library/Passes/Cards/{}{}", card_hash, ext);
@@ -260,6 +310,10 @@ where
 
     write_system_files_batch(udid, &items, &mut progress, &mut log)
         .context("Failed to write card skin batch")?;
+
+    if let WalletArt::Png(png) = art {
+        remember_applied_png(card_hash, png);
+    }
 
     let done = items.len() + 1;
     progress(done, done, "Card skin updated successfully!");
