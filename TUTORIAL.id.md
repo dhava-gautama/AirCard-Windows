@@ -79,7 +79,13 @@ Hash contoh terlihat seperti `k6pyiSrrP1J2v3t51G1sEDDnOZo=` (hasil Scan, bukan n
 | Kulit tidak kelihatan | Paksa tutup Wallet, atau reboot iPhone |
 | Tema passcode tidak kelihatan | Matikan Teks Tebal, kunci layar ulang |
 
-Jangan unduh “perbaikan driver” dari situs random. Kalau driver Apple rusak, pasang ulang **Apple Mobile Device Support** dari Apple.
+Kalau iPhone masih tidak muncul, driver USB Apple di Windows sering rusak. Langkah opsional:
+
+1. Cabut iPhone.
+2. Pasang **[3uTools](https://www.3u.com/)** → **Toolbox → Repair Driver → Repair Now**.
+3. Colok lagi, ketuk **Percayai**, buka AirCard.
+
+3uTools bukan software Apple. Utamakan pasang ulang **Apple Mobile Device Support** dulu.
 
 ## Kredit
 

@@ -71,7 +71,13 @@ CLI:
 | SyncFailed / 35s timeout | This fork, not the old Lumid-Off release; quit iTunes |
 | Skin not visible | Force-close Wallet or reboot |
 
-Reinstall Apple’s Mobile Device Support if USB detection is broken. Avoid random “driver repair” installers.
+If the iPhone is still missing after that, Apple USB drivers on Windows are often the cause. Optional last resort:
+
+1. Disconnect the iPhone.
+2. Install **[3uTools](https://www.3u.com/)** → **Toolbox → Repair Driver → Repair Now**.
+3. Reconnect, tap **Trust**, launch AirCard.
+
+3uTools is third-party (not Apple). Prefer repairing with Apple Mobile Device Support first.
 
 ## Credits
 
