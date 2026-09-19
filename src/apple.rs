@@ -126,14 +126,21 @@ pub struct AppleLibraries {
 
     // AirTrafficHost functions
     pub at_host_connection_create: unsafe extern "C" fn(CFStringRef) -> ATHostConnectionRef,
+    pub at_host_connection_create_with_library:
+        unsafe extern "C" fn(CFStringRef, CFStringRef, usize) -> ATHostConnectionRef,
     pub at_host_connection_release: unsafe extern "C" fn(ATHostConnectionRef),
     pub at_host_connection_send_host_info: unsafe extern "C" fn(ATHostConnectionRef, CFDictionaryRef),
     pub at_host_connection_send_sync_request: unsafe extern "C" fn(ATHostConnectionRef, CFArrayRef, CFDictionaryRef, CFDictionaryRef),
     pub at_host_connection_send_metadata_sync_finished: unsafe extern "C" fn(ATHostConnectionRef, CFDictionaryRef, CFDictionaryRef),
     pub at_host_connection_send_asset_completed: unsafe extern "C" fn(ATHostConnectionRef, CFStringRef, CFStringRef, CFStringRef),
+    pub at_host_connection_send_power_assertion: unsafe extern "C" fn(ATHostConnectionRef, CFTypeRef) -> i32,
+    pub at_host_connection_send_message: unsafe extern "C" fn(ATHostConnectionRef, CFTypeRef) -> i32,
+    pub at_host_connection_get_current_session_number: unsafe extern "C" fn(ATHostConnectionRef) -> u32,
     pub at_host_connection_read_message: unsafe extern "C" fn(ATHostConnectionRef) -> CFDictionaryRef,
+    pub at_cf_message_create: unsafe extern "C" fn(u32, CFStringRef, CFDictionaryRef) -> CFTypeRef,
     pub at_cf_message_get_name: unsafe extern "C" fn(CFDictionaryRef) -> CFStringRef,
     pub at_cf_message_get_param: unsafe extern "C" fn(CFDictionaryRef, CFStringRef) -> CFTypeRef,
+    pub k_cf_boolean_true: usize,
 }
 
 static LIBRARIES: OnceLock<Arc<AppleLibraries>> = OnceLock::new();
@@ -238,14 +245,28 @@ pub fn get_apple_libraries() -> Result<Arc<AppleLibraries>> {
         let afc_remove_path = load_sym!(md_lib, "AFCRemovePath");
 
         let at_host_connection_create = load_sym!(ath_lib, "ATHostConnectionCreate");
+        let at_host_connection_create_with_library =
+            load_sym!(ath_lib, "ATHostConnectionCreateWithLibrary");
         let at_host_connection_release = load_sym!(ath_lib, "ATHostConnectionRelease");
         let at_host_connection_send_host_info = load_sym!(ath_lib, "ATHostConnectionSendHostInfo");
         let at_host_connection_send_sync_request = load_sym!(ath_lib, "ATHostConnectionSendSyncRequest");
         let at_host_connection_send_metadata_sync_finished = load_sym!(ath_lib, "ATHostConnectionSendMetadataSyncFinished");
         let at_host_connection_send_asset_completed = load_sym!(ath_lib, "ATHostConnectionSendAssetCompleted");
+        let at_host_connection_send_power_assertion =
+            load_sym!(ath_lib, "ATHostConnectionSendPowerAssertion");
+        let at_host_connection_send_message = load_sym!(ath_lib, "ATHostConnectionSendMessage");
+        let at_host_connection_get_current_session_number =
+            load_sym!(ath_lib, "ATHostConnectionGetCurrentSessionNumber");
         let at_host_connection_read_message = load_sym!(ath_lib, "ATHostConnectionReadMessage");
+        let at_cf_message_create = load_sym!(ath_lib, "ATCFMessageCreate");
         let at_cf_message_get_name = load_sym!(ath_lib, "ATCFMessageGetName");
         let at_cf_message_get_param = load_sym!(ath_lib, "ATCFMessageGetParam");
+        let k_cf_boolean_true: usize = {
+            let symbol: Symbol<*const std::ffi::c_void> = cf_lib
+                .get(b"kCFBooleanTrue\0")
+                .context("Missing symbol: kCFBooleanTrue")?;
+            *symbol as usize
+        };
 
         let apple_libs = Arc::new(AppleLibraries {
             _cf_lib: cf_lib,
@@ -308,14 +329,20 @@ pub fn get_apple_libraries() -> Result<Arc<AppleLibraries>> {
             afc_remove_path,
 
             at_host_connection_create,
+            at_host_connection_create_with_library,
             at_host_connection_release,
             at_host_connection_send_host_info,
             at_host_connection_send_sync_request,
             at_host_connection_send_metadata_sync_finished,
             at_host_connection_send_asset_completed,
+            at_host_connection_send_power_assertion,
+            at_host_connection_send_message,
+            at_host_connection_get_current_session_number,
             at_host_connection_read_message,
+            at_cf_message_create,
             at_cf_message_get_name,
             at_cf_message_get_param,
+            k_cf_boolean_true,
         });
 
         let _ = LIBRARIES.set(Arc::clone(&apple_libs));

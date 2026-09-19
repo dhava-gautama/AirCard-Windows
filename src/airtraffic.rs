@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -6,31 +5,26 @@ use anyhow::{Context, Result, bail};
 
 use crate::apple::{ATHostConnectionRef, get_apple_libraries};
 
-#[link(name = "bcrypt")]
-unsafe extern "system" {
-    fn BCryptGenRandom(
-        hAlgorithm: *mut std::ffi::c_void,
-        pbBuffer: *mut u8,
-        cbBuffer: u32,
-        dwFlags: u32,
-    ) -> i32;
-}
+/// Replayable 84-byte host Grappa blob from yinyajiang/go-tunes.
+/// Windows AirTrafficHost cannot mint a live FairPlay Grappa; sending
+/// SendSyncRequest without this blob yields ErrorCode 12, and the DLL's
+/// uninitialized blob yields ErrorCode 4 (invalid Grappa).
+const HOST_GRAPPA: [u8; 84] = [
+    0x01, 0x01, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+    0x11, 0x11, 0x04, 0x40, 0xbc, 0x27, 0x85, 0xe0, 0xdb, 0xf1, 0x66, 0x36, 0x1e, 0x07, 0x98, 0x0a,
+    0x5e, 0xa4, 0x8d, 0xba, 0x95, 0xb3, 0xb8, 0xea, 0x26, 0x5d, 0x62, 0xae, 0xfe, 0xa5, 0x1b, 0xb7,
+    0xb1, 0x90, 0xe0, 0xb7, 0x71, 0x26, 0x29, 0x0a, 0xd3, 0x9b, 0xb1, 0x3f, 0xec, 0xc0, 0x8c, 0x25,
+    0xa9, 0x56, 0x1c, 0x51, 0x7a, 0xc1, 0x1e, 0x64, 0x90, 0x5d, 0xa0, 0x29, 0xe6, 0x1b, 0xdf, 0xd0,
+    0xba, 0x22, 0xc3, 0x13,
+];
 
-fn generate_uuid_v4() -> String {
-    let mut bytes = [0u8; 16];
-    unsafe {
-        let _ = BCryptGenRandom(std::ptr::null_mut(), bytes.as_mut_ptr(), bytes.len() as u32, 2);
-    }
-    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
-    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5],
-        bytes[6], bytes[7],
-        bytes[8], bytes[9],
-        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
-    )
+const LIBRARY_ID: &str = "12.6.0.100";
+const HOST_VERSION: &str = "12.6.0.100";
+
+fn plist_to_cf(libs: &crate::apple::AppleLibraries, value: &plist::Value) -> Result<crate::apple::CFTypeGuard> {
+    let mut bytes = Vec::new();
+    plist::to_writer_binary(&mut bytes, value).context("Failed to encode CF plist")?;
+    libs.create_cf_plist_from_bytes(&bytes)
 }
 
 pub enum SyncEvent {
@@ -61,18 +55,20 @@ where
         let _ = tx.send(SyncEvent::Done(res));
     });
 
+    // macOS airlift uses ~300s; Windows port's 35s was aborting mid-handshake on iOS 26+.
+    const SYNC_TIMEOUT_SECS: u64 = 120;
     let start = std::time::Instant::now();
     loop {
         let elapsed = start.elapsed();
-        if elapsed >= Duration::from_secs(35) {
-            bail!("AirTraffic sync timed out (35s). 1) Разблокируйте экран iPhone и держите включенным. 2) Откройте приложение «Книги» (Apple Books) на iPhone один раз. 3) Закройте iTunes на ПК.");
+        if elapsed >= Duration::from_secs(SYNC_TIMEOUT_SECS) {
+            bail!("AirTraffic sync timed out ({}s). Keep iPhone unlocked, open Books once, quit iTunes/Apple Devices on PC.", SYNC_TIMEOUT_SECS);
         }
-        let timeout = Duration::from_secs(35) - elapsed;
+        let timeout = Duration::from_secs(SYNC_TIMEOUT_SECS) - elapsed;
         match rx.recv_timeout(timeout) {
             Ok(SyncEvent::Log(msg)) => log(&msg),
             Ok(SyncEvent::Done(res)) => return res,
             Err(_) => {
-                bail!("AirTraffic sync timed out (35s). 1) Разблокируйте экран iPhone и держите включенным. 2) Откройте приложение «Книги» (Apple Books) на iPhone один раз. 3) Закройте iTunes на ПК.");
+                bail!("AirTraffic sync timed out ({}s). Keep iPhone unlocked, open Books once, quit iTunes/Apple Devices on PC.", SYNC_TIMEOUT_SECS);
             }
         }
     }
@@ -85,17 +81,43 @@ where
     log("Connecting to iOS AirTraffic service (com.apple.atc)...");
     let libs = get_apple_libraries()?;
     let cf_udid = libs.create_cf_string(udid)?;
+    let cf_library = libs.create_cf_string(LIBRARY_ID)?;
 
-    let conn: ATHostConnectionRef = unsafe { (libs.at_host_connection_create)(cf_udid.raw) };
+    // Windows ATH requires CreateWithLibrary(libraryID, udid, flags).
+    // One-arg Create(udid) connects but cannot complete Grappa.
+    let mut conn: ATHostConnectionRef =
+        unsafe { (libs.at_host_connection_create_with_library)(cf_library.raw, cf_udid.raw, 0) };
     if conn.is_null() {
-        bail!("ATHostConnectionCreate failed for UDID: {}", udid);
+        log("CreateWithLibrary returned null, falling back to ATHostConnectionCreate...");
+        conn = unsafe { (libs.at_host_connection_create)(cf_udid.raw) };
+    }
+    if conn.is_null() {
+        bail!("ATHostConnectionCreateWithLibrary failed for UDID: {}", udid);
     }
 
     let mut run_sync = || -> Result<()> {
+        let session = unsafe { (libs.at_host_connection_get_current_session_number)(conn) };
+        log(&format!("AirTraffic session {session}, sending HostInfo..."));
+
+        let host_info_value = plist::Value::Dictionary({
+            let mut d = plist::Dictionary::new();
+            d.insert("LibraryID".into(), LIBRARY_ID.into());
+            d.insert("SyncHostName".into(), "airlift".into());
+            d.insert("Version".into(), HOST_VERSION.into());
+            d.insert(
+                "SyncedDataclasses".into(),
+                plist::Value::Array(vec!["Book".into()]),
+            );
+            d
+        });
+        let cf_host_info = plist_to_cf(&libs, &host_info_value)?;
+        unsafe {
+            (libs.at_host_connection_send_host_info)(conn, cf_host_info.raw);
+        }
+
         log("Waiting for SyncAllowed from iPhone (keep screen unlocked)...");
-        // 1. Wait for SyncAllowed message
         let mut sync_allowed = false;
-        for _ in 0..15 {
+        for _ in 0..20 {
             let msg = unsafe { (libs.at_host_connection_read_message)(conn) };
             if msg.is_null() {
                 sleep(Duration::from_millis(150));
@@ -108,56 +130,56 @@ where
                 sync_allowed = true;
                 break;
             } else {
-                log(&format!("AirTraffic message: {}", name));
+                log(&format!("AirTraffic message: {name}"));
             }
         }
         if !sync_allowed {
             bail!("AirTraffic: SyncAllowed message not received. Ensure iPhone screen is unlocked and Books app is opened.");
         }
 
-        log("SyncAllowed received! Handshaking Books sync request...");
-        // 2. Send HostInfo
-        let mut host_info_dict = HashMap::new();
-        host_info_dict.insert("Type".to_string(), plist::Value::String("iTunes".to_string()));
-        host_info_dict.insert("Version".to_string(), plist::Value::String("13.7.0.161".to_string()));
-        host_info_dict.insert("MacOSVersion".to_string(), plist::Value::String("Windows NT 10.0".to_string()));
-        host_info_dict.insert("SyncHostName".to_string(), plist::Value::String("airlift".to_string()));
-        host_info_dict.insert("LibraryID".to_string(), plist::Value::String(generate_uuid_v4()));
-        host_info_dict.insert("SyncedDataclasses".to_string(), plist::Value::Array(vec![plist::Value::String("Book".to_string())]));
-        host_info_dict.insert("SyncedAssetTypes".to_string(), plist::Value::Array(vec![plist::Value::String("Book".to_string())]));
-        host_info_dict.insert("Wakeable".to_string(), plist::Value::Boolean(false));
+        log("SyncAllowed received! Sending RequestingSync with replay Grappa...");
 
-        let mut host_info_bytes = Vec::new();
-        plist::to_writer_binary(&mut host_info_bytes, &plist::Value::Dictionary(host_info_dict.into_iter().collect()))?;
-        let cf_host_info = libs.create_cf_plist_from_bytes(&host_info_bytes)?;
-
-        unsafe {
-            (libs.at_host_connection_send_host_info)(conn, cf_host_info.raw);
-        }
-        sleep(Duration::from_millis(200));
-
-        // 3. Send SyncRequest
-        let mut dataclasses_bytes = Vec::new();
-        plist::to_writer_binary(&mut dataclasses_bytes, &plist::Value::Array(vec![plist::Value::String("Book".to_string())]))?;
-        let cf_dataclasses = libs.create_cf_plist_from_bytes(&dataclasses_bytes)?;
-
-        let mut anchors_bytes = Vec::new();
-        plist::to_writer_binary(&mut anchors_bytes, &plist::Value::Dictionary(HashMap::<String, plist::Value>::new().into_iter().collect()))?;
-        let cf_anchors = libs.create_cf_plist_from_bytes(&anchors_bytes)?;
-
-        unsafe {
-            (libs.at_host_connection_send_sync_request)(
-                conn,
-                cf_dataclasses.raw,
-                cf_anchors.raw,
-                cf_host_info.raw,
+        let requesting = plist::Value::Dictionary({
+            let mut d = plist::Dictionary::new();
+            d.insert(
+                "Dataclasses".into(),
+                plist::Value::Array(vec!["Book".into()]),
             );
+            d.insert("DataclassAnchors".into(), {
+                let mut a = plist::Dictionary::new();
+                a.insert("Book".into(), "0".into());
+                plist::Value::Dictionary(a)
+            });
+            d.insert("HostInfo".into(), {
+                let mut hi = plist::Dictionary::new();
+                hi.insert("Grappa".into(), plist::Value::Data(HOST_GRAPPA.to_vec()));
+                hi.insert("LibraryID".into(), LIBRARY_ID.into());
+                hi.insert("SyncHostName".into(), "airlift".into());
+                hi.insert("Version".into(), HOST_VERSION.into());
+                hi.insert(
+                    "SyncedDataclasses".into(),
+                    plist::Value::Array(vec!["Book".into()]),
+                );
+                plist::Value::Dictionary(hi)
+            });
+            d
+        });
+        let cf_params = plist_to_cf(&libs, &requesting)?;
+        let cf_cmd = libs.create_cf_string("RequestingSync")?;
+        let msg = unsafe { (libs.at_cf_message_create)(session, cf_cmd.raw, cf_params.raw) };
+        if msg.is_null() {
+            bail!("ATCFMessageCreate(RequestingSync) returned null");
         }
+        let send_status = unsafe { (libs.at_host_connection_send_message)(conn, msg) };
+        unsafe {
+            (libs.cf_release)(msg);
+        }
+        log(&format!("RequestingSync send status={send_status}"));
 
         log("Waiting for ReadyForSync from iPhone...");
-        // 4. Wait for ReadyForSync
         let mut ready_for_sync = false;
-        for _ in 0..20 {
+        let ready_deadline = std::time::Instant::now() + Duration::from_secs(90);
+        while std::time::Instant::now() < ready_deadline {
             let msg = unsafe { (libs.at_host_connection_read_message)(conn) };
             if msg.is_null() {
                 sleep(Duration::from_millis(150));
@@ -165,25 +187,85 @@ where
             }
             let name_ref = unsafe { (libs.at_cf_message_get_name)(msg) };
             let name = libs.to_rust_string(name_ref);
-            unsafe { (libs.cf_release)(msg) };
+            log(&format!("AirTraffic message (post-RequestingSync): {name}"));
             if name == "ReadyForSync" {
+                unsafe { (libs.cf_release)(msg) };
                 ready_for_sync = true;
                 break;
             }
+            if name == "SyncFailed" || name == "SyncFinished" {
+                let mut detail = String::new();
+                for key in [
+                    "Error",
+                    "FailureReason",
+                    "Reason",
+                    "Message",
+                    "Status",
+                    "ErrorCode",
+                    "ErrorDescription",
+                    "Params",
+                ] {
+                    if let Ok(cf_key) = libs.create_cf_string(key) {
+                        let param = unsafe { (libs.at_cf_message_get_param)(msg, cf_key.raw) };
+                        if !param.is_null() {
+                            if let Ok(bytes) = libs.cf_plist_to_bytes(param) {
+                                let preview = String::from_utf8_lossy(&bytes);
+                                detail.push_str(&format!(" {key}={preview}"));
+                            } else {
+                                let as_str = libs.to_rust_string(param);
+                                if !as_str.is_empty() {
+                                    detail.push_str(&format!(" {key}={as_str}"));
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Ok(bytes) = libs.cf_plist_to_bytes(msg) {
+                    detail.push_str(&format!(
+                        " raw_msg_len={} raw_hex={}",
+                        bytes.len(),
+                        bytes.iter().take(120).map(|b| format!("{b:02x}")).collect::<String>()
+                    ));
+                }
+                unsafe { (libs.cf_release)(msg) };
+                bail!("AirTraffic returned {name} instead of ReadyForSync.{detail}");
+            }
+            unsafe { (libs.cf_release)(msg) };
         }
         if !ready_for_sync {
             bail!("AirTraffic: ReadyForSync message not received from device");
         }
 
-        // 5. Send MetadataSyncFinished
-        let mut sync_types_dict = HashMap::new();
-        sync_types_dict.insert("Book".to_string(), plist::Value::Integer(1.into()));
-        let mut sync_types_bytes = Vec::new();
-        plist::to_writer_binary(&mut sync_types_bytes, &plist::Value::Dictionary(sync_types_dict.into_iter().collect()))?;
-        let cf_sync_types = libs.create_cf_plist_from_bytes(&sync_types_bytes)?;
+        if assets.is_empty() {
+            log("ReadyForSync received (probe, no assets) — handshake OK.");
+            return Ok(());
+        }
+
+        log("ReadyForSync received. Finishing Books metadata sync...");
+        let cf_true = plist_to_cf(&libs, &plist::Value::Boolean(true))?;
+        unsafe {
+            (libs.at_host_connection_send_power_assertion)(conn, cf_true.raw);
+        }
+
+        let sync_types = plist::Value::Dictionary({
+            let mut d = plist::Dictionary::new();
+            d.insert("Book".into(), plist::Value::Integer(1.into()));
+            d
+        });
+        let cf_sync_types = plist_to_cf(&libs, &sync_types)?;
+        let anchors = plist::Value::Dictionary({
+            let mut d = plist::Dictionary::new();
+            d.insert("Book".into(), "0".into());
+            d
+        });
+        let cf_anchors = plist_to_cf(&libs, &anchors)?;
 
         unsafe {
-            (libs.at_host_connection_send_metadata_sync_finished)(conn, cf_sync_types.raw, cf_anchors.raw);
+            (libs.at_host_connection_send_metadata_sync_finished)(
+                conn,
+                cf_sync_types.raw,
+                cf_anchors.raw,
+            );
         }
 
         // 6. Read AssetManifest
