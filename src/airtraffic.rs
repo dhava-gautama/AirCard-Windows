@@ -92,7 +92,7 @@ where
         conn = unsafe { (libs.at_host_connection_create)(cf_udid.raw) };
     }
     if conn.is_null() {
-        bail!("ATHostConnectionCreateWithLibrary failed for UDID: {}", udid);
+        bail!("ATHostConnectionCreateWithLibrary failed for the selected device");
     }
 
     let mut run_sync = || -> Result<()> {
@@ -194,41 +194,22 @@ where
                 break;
             }
             if name == "SyncFailed" || name == "SyncFinished" {
-                let mut detail = String::new();
-                for key in [
-                    "Error",
-                    "FailureReason",
-                    "Reason",
-                    "Message",
-                    "Status",
-                    "ErrorCode",
-                    "ErrorDescription",
-                    "Params",
-                ] {
-                    if let Ok(cf_key) = libs.create_cf_string(key) {
-                        let param = unsafe { (libs.at_cf_message_get_param)(msg, cf_key.raw) };
-                        if !param.is_null() {
-                            if let Ok(bytes) = libs.cf_plist_to_bytes(param) {
-                                let preview = String::from_utf8_lossy(&bytes);
-                                detail.push_str(&format!(" {key}={preview}"));
-                            } else {
-                                let as_str = libs.to_rust_string(param);
-                                if !as_str.is_empty() {
-                                    detail.push_str(&format!(" {key}={as_str}"));
-                                }
-                            }
-                        }
+                // A single numeric parameter is enough for diagnostics. Never
+                // print the full message, plist body, Grappa data or token.
+                let error_code = libs.create_cf_string("ErrorCode").ok().and_then(|key| {
+                    let param = unsafe { (libs.at_cf_message_get_param)(msg, key.raw) };
+                    if param.is_null() {
+                        return None;
                     }
-                }
-                if let Ok(bytes) = libs.cf_plist_to_bytes(msg) {
-                    detail.push_str(&format!(
-                        " raw_msg_len={} raw_hex={}",
-                        bytes.len(),
-                        bytes.iter().take(120).map(|b| format!("{b:02x}")).collect::<String>()
-                    ));
-                }
+                    let bytes = libs.cf_plist_to_bytes(param).ok()?;
+                    let value = plist::Value::from_reader(std::io::Cursor::new(bytes)).ok()?;
+                    numeric_error_code(&value)
+                });
                 unsafe { (libs.cf_release)(msg) };
-                bail!("AirTraffic returned {name} instead of ReadyForSync.{detail}");
+                if let Some(code) = error_code {
+                    bail!("AirTraffic returned {name} instead of ReadyForSync. ErrorCode={code}");
+                }
+                bail!("AirTraffic returned {name} instead of ReadyForSync. ErrorCode unavailable");
             }
             unsafe { (libs.cf_release)(msg) };
         }
@@ -358,4 +339,29 @@ where
         (libs.at_host_connection_release)(conn);
     }
     result
+}
+
+fn numeric_error_code(value: &plist::Value) -> Option<String> {
+    value
+        .as_signed_integer()
+        .map(|n| n.to_string())
+        .or_else(|| value.as_unsigned_integer().map(|n| n.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::numeric_error_code;
+
+    #[test]
+    fn failure_log_accepts_only_numeric_error_code() {
+        assert_eq!(
+            numeric_error_code(&plist::Value::Integer(4.into())),
+            Some("4".into())
+        );
+        assert_eq!(
+            numeric_error_code(&plist::Value::String("private token".into())),
+            None
+        );
+        assert_eq!(numeric_error_code(&plist::Value::Data(vec![1, 2, 3])), None);
+    }
 }
