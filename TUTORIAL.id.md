@@ -51,10 +51,13 @@ File hasil: `target\release\aircard.exe`.
 ### Lewat command line
 
 ```powershell
+.\aircard.exe --probe
 .\aircard.exe --flash "HASH_KARTU_DI_SINI" "D:\gambar.png"
 .\aircard.exe --flash "HASH_KARTU_DI_SINI" "D:\suica.pdf"
 .\aircard.exe --passcode "D:\tema.passthm"
 ```
+
+`--probe` hanya menguji handshake AirTraffic (`ReadyForSync`). Tidak menulis kulit Wallet. Di jendela aplikasi, tombol **Probe** melakukan hal yang sama.
 
 Hash contoh terlihat seperti `k6pyiSrrP1J2v3t51G1sEDDnOZo=` (hasil Scan, bukan nomor kartu bank).
 
@@ -75,7 +78,7 @@ Hash contoh terlihat seperti `k6pyiSrrP1J2v3t51G1sEDDnOZo=` (hasil Scan, bukan n
 |--------|-------------|
 | iPhone tidak terdeteksi | Kabel lain, Trust ulang, pastikan layanan Apple Mobile Device berjalan |
 | `SyncAllowed` tidak muncul | Buka kunci, layar nyala, buka **Buku** sekali |
-| `SyncFailed` / timeout 35 detik | Pakai build fork ini (bukan `aircard.exe` rilis Lumid-Off lama). Tutup iTunes / Apple Devices |
+| SyncFailed / timeout 35 detik | Pakai build fork ini (bukan `aircard.exe` rilis Lumid-Off lama). Tutup iTunes / Apple Devices. Jalankan `--probe` dulu |
 | Kulit tidak kelihatan | Paksa tutup Wallet, atau reboot iPhone |
 | Tema passcode tidak kelihatan | Kunci layar ulang; pastikan cache `--white-bold` ikut (build 1.3+) |
 

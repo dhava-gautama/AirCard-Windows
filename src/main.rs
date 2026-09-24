@@ -16,19 +16,18 @@ mod scanner;
 
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    let env_probe = std::env::var("AIRCARD_PROBE_ONLY").as_deref() == Ok("1");
     if let Some(valid_args) = probe_command(&args) {
         attach_probe_console();
         if !valid_args {
             eprintln!("Usage: aircard.exe --probe");
             std::process::exit(2);
         }
-        match cli_probe() {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                eprintln!("Error: {e:#}");
-                std::process::exit(1);
-            }
-        }
+        return run_probe_and_exit();
+    }
+    if env_probe {
+        attach_probe_console();
+        return run_probe_and_exit();
     }
     if args.len() >= 4 && args[1] == "--flash" {
         match cli_flash(&args[2], &args[3]) {
@@ -84,6 +83,16 @@ fn probe_command(args: &[String]) -> Option<bool> {
     (args.get(1).map(String::as_str) == Some("--probe")).then_some(args.len() == 2)
 }
 
+fn run_probe_and_exit() -> eframe::Result<()> {
+    match cli_probe() {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            eprintln!("Error: {e:#}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn warn_blocking_apps() {
     let apps = host_guard::blocking_sync_apps();
     if !apps.is_empty() {
@@ -107,6 +116,7 @@ fn first_udid() -> anyhow::Result<String> {
 
 fn cli_probe() -> anyhow::Result<()> {
     // Only query the local usbmux device list. Do not open AFC or run cleanup_books.
+    warn_blocking_apps();
     let mut usb_devices = device::query_usbmux_devices()?
         .into_iter()
         .filter(|d| d.connection_type.eq_ignore_ascii_case("USB"));

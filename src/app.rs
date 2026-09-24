@@ -6,6 +6,7 @@ use std::thread;
 
 use eframe::egui;
 
+use crate::airtraffic;
 use crate::apple;
 use crate::device::{DeviceInfo, list_connected_devices};
 use crate::flasher::{WalletArt, flash_passcode_theme, flash_wallet_skin, load_previous_png};
@@ -736,6 +737,40 @@ impl AirCardApp {
         });
     }
 
+    fn probe_handshake(&mut self) {
+        let Some(udid) = self.selected_udid.clone() else {
+            self.add_log("Probe failed: No connected iPhone selected.");
+            self.status_msg = "Please select a connected iPhone.".to_string();
+            return;
+        };
+        self.refresh_guard();
+        self.is_busy = true;
+        self.progress_step = 0;
+        self.progress_total = 1;
+        self.progress_msg = "Probing AirTraffic handshake...".to_string();
+        self.status_msg = "Handshake probe (no Wallet write)...".to_string();
+        self.add_log("Starting AirTraffic handshake probe (no AFC cleanup, no asset write)");
+
+        let (tx, rx) = channel();
+        self.task_rx = Some(rx);
+        thread::spawn(move || {
+            let tx_log = tx.clone();
+            let res = airtraffic::sync_assets_via_airtraffic(&udid, &[], move |msg| {
+                let _ = tx_log.send(BackgroundTaskMessage::Log(msg.to_string()));
+            });
+            match res {
+                Ok(()) => {
+                    let _ = tx.send(BackgroundTaskMessage::Done(Ok(
+                        "Handshake OK — ReadyForSync. No Wallet files were written.".into(),
+                    )));
+                }
+                Err(e) => {
+                    let _ = tx.send(BackgroundTaskMessage::Done(Err(format!("{:#}", e))));
+                }
+            }
+        });
+    }
+
     fn handle_messages(&mut self) {
         let mut messages = Vec::new();
         if let Some(ref rx) = self.task_rx {
@@ -983,6 +1018,12 @@ impl eframe::App for AirCardApp {
                         if m3_button_outlined(ui, self.lang.code()) {
                             self.cycle_lang();
                         }
+                        let can_probe = !self.is_busy && self.selected_udid.is_some();
+                        ui.add_enabled_ui(can_probe, |ui| {
+                            if m3_button_outlined(ui, t.probe) {
+                                self.probe_handshake();
+                            }
+                        });
                         if m3_button_outlined(ui, "Refresh") {
                             self.refresh_devices();
                             self.refresh_guard();
@@ -1548,6 +1589,7 @@ impl AirCardApp {
                 ui.label(egui::RichText::new("- 64-bit iTunes or Apple Mobile Device Support installed").size(11.5).color(md3::ON_SURFACE_VARIANT));
                 ui.label(egui::RichText::new("- Connect iPhone via USB-C or Lightning cable").size(11.5).color(md3::ON_SURFACE_VARIANT));
                 ui.label(egui::RichText::new("- Unlock iPhone and tap \"Trust this Computer\"").size(11.5).color(md3::ON_SURFACE_VARIANT));
+                ui.label(egui::RichText::new("- Probe (header) or aircard.exe --probe tests handshake without writing a skin").size(11.5).color(md3::ON_SURFACE_VARIANT));
 
                 ui.add_space(18.0);
 

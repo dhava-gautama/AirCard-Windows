@@ -65,6 +65,7 @@ pub struct T {
     pub apply_passcode: &'static str,
     pub bold_note: &'static str,
     pub ready: &'static str,
+    pub probe: &'static str,
 }
 
 pub fn t(lang: Lang) -> T {
@@ -112,6 +113,7 @@ pub fn t(lang: Lang) -> T {
             apply_passcode: "Apply Passcode Theme",
             bold_note: "Bold Text caches are flashed too (--white-bold). Lock the phone to view.",
             ready: "Ready",
+            probe: "Probe",
         },
         Lang::Id => T {
             wallet: "Dompet",
@@ -156,6 +158,7 @@ pub fn t(lang: Lang) -> T {
             apply_passcode: "Pasang tema kode sandi",
             bold_note: "Cache Teks Tebal ikut dipasang (--white-bold). Kunci layar untuk melihat.",
             ready: "Siap",
+            probe: "Probe",
         },
     }
 }

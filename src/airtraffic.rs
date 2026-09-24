@@ -346,6 +346,20 @@ fn numeric_error_code(value: &plist::Value) -> Option<String> {
         .as_signed_integer()
         .map(|n| n.to_string())
         .or_else(|| value.as_unsigned_integer().map(|n| n.to_string()))
+        .or_else(|| {
+            value.as_string().and_then(|s| {
+                let t = s.trim();
+                if !t.is_empty()
+                    && t.bytes()
+                        .enumerate()
+                        .all(|(i, b)| b.is_ascii_digit() || (i == 0 && b == b'-'))
+                {
+                    Some(t.to_string())
+                } else {
+                    None
+                }
+            })
+        })
 }
 
 #[cfg(test)]
@@ -356,6 +370,10 @@ mod tests {
     fn failure_log_accepts_only_numeric_error_code() {
         assert_eq!(
             numeric_error_code(&plist::Value::Integer(4.into())),
+            Some("4".into())
+        );
+        assert_eq!(
+            numeric_error_code(&plist::Value::String("4".into())),
             Some("4".into())
         );
         assert_eq!(

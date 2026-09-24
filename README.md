@@ -59,7 +59,7 @@ CLI:
 
 ### AirTraffic handshake probe
 
-Run `aircard.exe --probe` from PowerShell or cmd with one USB-connected, unlocked iPhone; open Books once beforehand. The probe tests `SyncAllowed` → `RequestingSync` → `ReadyForSync` and then releases the connection. It does not run AFC cleanup, stage files, or write Wallet assets. It still sends the handshake messages to the device. The command attaches to the invoking Windows console to print progress and, on `SyncFailed`, only a numeric `ErrorCode` when available. Normal GUI launch remains windowed.
+Run `aircard.exe --probe` from PowerShell or cmd with one USB-connected, unlocked iPhone; open Books once beforehand. The probe tests `SyncAllowed` → `RequestingSync` → `ReadyForSync` and then releases the connection. It does not run AFC cleanup, stage files, or write Wallet assets. It still sends the handshake messages to the device. The command attaches to the invoking Windows console to print progress and, on `SyncFailed`, only a numeric `ErrorCode` when available. `AIRCARD_PROBE_ONLY=1` is kept as an alias (including with leftover `--flash` args). In the GUI, **Probe** runs the same handshake on the selected phone. Normal GUI launch remains windowed.
 
 **Additional single-device validation:** Manually verified on Windows with iPhone15,4 / iOS 18.7.1. Lumid-Off v1.2.2 reproduced `SyncFailed` ErrorCode 4; this fork's handshake probe reached `ReadyForSync`, and a subsequent full Wallet artwork application succeeded. This is one real-device observation, not a claim of support for every iOS 18.x device or version. The Grappa handshake fix was already present in this fork; the probe and narrower failure logging do not introduce that fix.
 
@@ -84,7 +84,7 @@ Run `aircard.exe --probe` from PowerShell or cmd with one USB-connected, unlocke
 |--------|-----|
 | No device | Cable, Trust, Apple Mobile Device Service running |
 | Stuck on SyncAllowed | Unlocked screen, open Books once |
-| SyncFailed / 35s timeout | This fork, not the old Lumid-Off release; quit iTunes |
+| SyncFailed / 35s timeout | This fork, not the old Lumid-Off release; quit iTunes; run `--probe` first |
 | Skin not visible | Force-close Wallet or reboot |
 
 If the iPhone is still missing after that, Apple USB drivers on Windows are often the cause. Optional last resort:
