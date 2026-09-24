@@ -9,10 +9,15 @@ use eframe::egui;
 use crate::airtraffic;
 use crate::apple;
 use crate::device::{DeviceInfo, list_connected_devices};
-use crate::flasher::{WalletArt, flash_passcode_theme, flash_wallet_skin, load_previous_png};
+use crate::flasher::{
+    WalletArt, capture_original_artwork, flash_passcode_theme, flash_wallet_skin,
+    load_previous_png, original_backup_exists, restore_original_artwork,
+};
 use crate::host_guard;
 use crate::i18n::{self, Lang, save_settings};
-use crate::image_skin::PreparedSkin;
+use crate::image_skin::{
+    PreparedSkin, decode_image, encode_wallet_pngs, frame_card, png_2x_from_3x, preview_color_image,
+};
 use crate::keypad::{load_individual_keys, slice_poster, sliced_to_passthm_items};
 use crate::passthm::{PasscodeTheme, parse_passthm_file};
 use crate::scanner::{
@@ -31,6 +36,28 @@ enum BackgroundTaskMessage {
     Log(String),
     CardFound { hash: String, name: String },
     Done(Result<String, String>),
+}
+
+enum SkinPrepMessage {
+    Decoded {
+        job_id: u64,
+        image: Arc<image::DynamicImage>,
+        path: PathBuf,
+        source_width: u32,
+        source_height: u32,
+    },
+    Preview {
+        job_id: u64,
+        preview: egui::ColorImage,
+    },
+    Ready {
+        job_id: u64,
+        skin: PreparedSkin,
+    },
+    Failed {
+        job_id: u64,
+        error: String,
+    },
 }
 
 #[cfg(windows)]
@@ -99,6 +126,11 @@ pub struct AirCardApp {
     crop_zoom: f32,
     crop_pan_x: f32,
     crop_pan_y: f32,
+    source_image: Option<Arc<image::DynamicImage>>,
+    skin_prep_rx: Option<Receiver<SkinPrepMessage>>,
+    skin_prep_job_id: u64,
+    preparing_skin: bool,
+    crop_dirty_since: Option<std::time::Instant>,
     pdf_bytes: Option<Vec<u8>>,
     blocking_apps: Vec<String>,
     last_guard_check: std::time::Instant,
@@ -156,6 +188,11 @@ impl AirCardApp {
             crop_zoom: 1.0,
             crop_pan_x: 0.0,
             crop_pan_y: 0.0,
+            source_image: None,
+            skin_prep_rx: None,
+            skin_prep_job_id: 0,
+            preparing_skin: false,
+            crop_dirty_since: None,
             pdf_bytes: None,
             blocking_apps: host_guard::blocking_sync_apps(),
             last_guard_check: std::time::Instant::now(),
@@ -170,7 +207,7 @@ impl AirCardApp {
             show_logs_window: false,
         };
 
-        app.add_log("AirCard Windows v1.3.1 initialized");
+        app.add_log("AirCard Windows v1.3.2 initialized");
         app.add_log(format!("Apple Support Runtime: {}", if app.apple_ready { "Loaded and operational" } else { "Not found (iTunes required)" }));
         app.add_log(format!("Loaded {} saved card(s) from database", app.saved_cards.len()));
 
@@ -240,6 +277,10 @@ impl AirCardApp {
             .unwrap_or("")
             .to_ascii_lowercase();
         if ext == "pdf" {
+            self.skin_prep_job_id = self.skin_prep_job_id.wrapping_add(1);
+            self.preparing_skin = false;
+            self.source_image = None;
+            self.crop_dirty_since = None;
             match std::fs::read(&path) {
                 Ok(bytes) => {
                     self.add_log(format!(
@@ -262,53 +303,185 @@ impl AirCardApp {
 
         self.pdf_bytes = None;
         self.add_log(format!("Opening skin image: {}", path.display()));
-        match PreparedSkin::from_path_framed(&path, self.crop_zoom, self.crop_pan_x, self.crop_pan_y)
-        {
-            Ok(skin) => {
-                self.add_log(format!(
-                    "Skin processed: source {}x{} resampled to 1536x969 PNG ({:.1} KB)",
-                    skin.source_width,
-                    skin.source_height,
-                    skin.png.len() as f32 / 1024.0,
-                ));
-                self.skin_texture = Some(ctx.load_texture(
-                    "card-skin-preview",
-                    skin.preview.clone(),
-                    egui::TextureOptions::LINEAR,
-                ));
-                self.status_msg = format!(
-                    "Prepared {} ({}x{} -> 1536x969 PNG, {:.1} KB)",
-                    path.file_name().and_then(|n| n.to_str()).unwrap_or("image"),
-                    skin.source_width,
-                    skin.source_height,
-                    skin.png.len() as f32 / 1024.0,
-                );
-                self.source_path = Some(path);
-                self.skin = Some(skin);
-            }
-            Err(error) => {
-                self.add_log(format!("Image preparation failed: {error:#}"));
-                self.status_msg = format!("Could not prepare image: {error:#}");
-            }
-        }
+        self.status_msg = "Preparing preview…".to_string();
+        self.source_path = Some(path.clone());
+        self.start_skin_prep(ctx, Some(path), true);
     }
 
     fn reframe_skin(&mut self, ctx: &egui::Context) {
         if self.pdf_bytes.is_some() {
             return;
         }
-        let Some(path) = self.source_path.clone() else {
+        if self.source_image.is_none() && self.source_path.is_none() {
             return;
+        }
+        self.start_skin_prep(ctx, self.source_path.clone(), false);
+    }
+
+    fn start_skin_prep(&mut self, ctx: &egui::Context, path: Option<PathBuf>, decode: bool) {
+        self.skin_prep_job_id = self.skin_prep_job_id.wrapping_add(1);
+        let job_id = self.skin_prep_job_id;
+        self.preparing_skin = true;
+        self.skin = None;
+        self.crop_dirty_since = None;
+
+        let zoom = self.crop_zoom;
+        let pan_x = self.crop_pan_x;
+        let pan_y = self.crop_pan_y;
+        let cached = if decode {
+            None
+        } else {
+            self.source_image.clone()
         };
-        if let Ok(skin) =
-            PreparedSkin::from_path_framed(&path, self.crop_zoom, self.crop_pan_x, self.crop_pan_y)
-        {
-            self.skin_texture = Some(ctx.load_texture(
-                "card-skin-preview",
-                skin.preview.clone(),
-                egui::TextureOptions::LINEAR,
-            ));
-            self.skin = Some(skin);
+        let (tx, rx) = channel();
+        self.skin_prep_rx = Some(rx);
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            use image::GenericImageView;
+            use image::imageops::FilterType;
+
+            let image = if let Some(existing) = cached {
+                existing
+            } else {
+                let Some(path) = path.clone() else {
+                    let _ = tx.send(SkinPrepMessage::Failed {
+                        job_id,
+                        error: "No image path".into(),
+                    });
+                    ctx.request_repaint();
+                    return;
+                };
+                match decode_image(&path) {
+                    Ok(decoded) => {
+                        let (source_width, source_height) = decoded.dimensions();
+                        let image = Arc::new(decoded);
+                        let _ = tx.send(SkinPrepMessage::Decoded {
+                            job_id,
+                            image: Arc::clone(&image),
+                            path,
+                            source_width,
+                            source_height,
+                        });
+                        image
+                    }
+                    Err(error) => {
+                        let _ = tx.send(SkinPrepMessage::Failed {
+                            job_id,
+                            error: format!("{error:#}"),
+                        });
+                        ctx.request_repaint();
+                        return;
+                    }
+                }
+            };
+
+            let fast = frame_card(&image, zoom, pan_x, pan_y, FilterType::Triangle);
+            let _ = tx.send(SkinPrepMessage::Preview {
+                job_id,
+                preview: preview_color_image(&fast),
+            });
+            ctx.request_repaint();
+
+            let rgba = frame_card(&image, zoom, pan_x, pan_y, FilterType::Lanczos3);
+            match encode_wallet_pngs(&rgba) {
+                Ok((png, png_2x)) => {
+                    let (source_width, source_height) = image.dimensions();
+                    let _ = tx.send(SkinPrepMessage::Ready {
+                        job_id,
+                        skin: PreparedSkin {
+                            png,
+                            png_2x,
+                            preview: preview_color_image(&rgba),
+                            source_width,
+                            source_height,
+                        },
+                    });
+                }
+                Err(error) => {
+                    let _ = tx.send(SkinPrepMessage::Failed {
+                        job_id,
+                        error: format!("{error:#}"),
+                    });
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    fn handle_skin_prep(&mut self, ctx: &egui::Context) {
+        let mut messages = Vec::new();
+        if let Some(ref rx) = self.skin_prep_rx {
+            while let Ok(msg) = rx.try_recv() {
+                messages.push(msg);
+            }
+        }
+        for msg in messages {
+            match msg {
+                SkinPrepMessage::Decoded {
+                    job_id,
+                    image,
+                    path,
+                    source_width,
+                    source_height,
+                } => {
+                    if job_id != self.skin_prep_job_id {
+                        continue;
+                    }
+                    self.source_image = Some(image);
+                    self.source_path = Some(path);
+                    self.add_log(format!(
+                        "Decoded source {source_width}x{source_height}"
+                    ));
+                }
+                SkinPrepMessage::Preview { job_id, preview } => {
+                    if job_id != self.skin_prep_job_id {
+                        continue;
+                    }
+                    self.skin_texture = Some(ctx.load_texture(
+                        "card-skin-preview",
+                        preview,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                    self.status_msg = "Preview ready — encoding Wallet PNGs…".to_string();
+                }
+                SkinPrepMessage::Ready { job_id, skin } => {
+                    if job_id != self.skin_prep_job_id {
+                        continue;
+                    }
+                    self.add_log(format!(
+                        "Skin processed: source {}x{} resampled to 1536x969 PNG ({:.1} KB)",
+                        skin.source_width,
+                        skin.source_height,
+                        skin.png.len() as f32 / 1024.0,
+                    ));
+                    self.skin_texture = Some(ctx.load_texture(
+                        "card-skin-preview",
+                        skin.preview.clone(),
+                        egui::TextureOptions::LINEAR,
+                    ));
+                    self.status_msg = format!(
+                        "Prepared {} ({}x{} -> 1536x969 PNG, {:.1} KB)",
+                        self.source_path
+                            .as_ref()
+                            .and_then(|p| p.file_name())
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("image"),
+                        skin.source_width,
+                        skin.source_height,
+                        skin.png.len() as f32 / 1024.0,
+                    );
+                    self.skin = Some(skin);
+                    self.preparing_skin = false;
+                }
+                SkinPrepMessage::Failed { job_id, error } => {
+                    if job_id != self.skin_prep_job_id {
+                        continue;
+                    }
+                    self.preparing_skin = false;
+                    self.add_log(format!("Image preparation failed: {error}"));
+                    self.status_msg = format!("Could not prepare image: {error}");
+                }
+            }
         }
     }
 
@@ -436,12 +609,17 @@ impl AirCardApp {
             return;
         };
 
-        let png_bytes = skin.png.clone();
+        let png_3x = skin.png.clone();
+        let png_2x = skin.png_2x.clone();
         if let Some(path) = &self.source_path {
             set_card_last_image(&hash, path);
             self.saved_cards = load_saved_cards();
         }
-        self.start_wallet_flash(udid, hash, WalletArt::Png(png_bytes));
+        self.start_wallet_flash(
+            udid,
+            hash,
+            WalletArt::Png { png_3x, png_2x },
+        );
     }
 
     fn revert_card(&mut self) {
@@ -459,7 +637,102 @@ impl AirCardApp {
             self.add_log("Revert skipped: apply a skin twice to keep a previous copy.");
             return;
         };
-        self.start_wallet_flash(udid, hash, WalletArt::Png(png));
+        self.start_wallet_flash(udid, hash, png_pair_from_3x(png));
+    }
+
+    fn save_original_card(&mut self) {
+        let Some(udid) = self.selected_udid.clone() else {
+            self.status_msg = "Please select a connected iPhone.".to_string();
+            return;
+        };
+        let hash = self.card_hash.trim().to_string();
+        if hash.is_empty() {
+            self.status_msg = "Please enter or scan a target card hash.".to_string();
+            return;
+        }
+        if original_backup_exists(&udid, &hash) {
+            self.status_msg = "Original artwork already saved for this card.".to_string();
+            self.add_log("Save original skipped: backup already exists (never overwritten).");
+            return;
+        }
+        self.is_busy = true;
+        self.progress_step = 0;
+        self.progress_total = 3;
+        self.progress_msg = "Exporting original artwork...".to_string();
+        self.status_msg = "Saving original card art (Airlift read)...".to_string();
+        self.add_log(format!("Saving original artwork for {hash}"));
+        self.refresh_guard();
+        let (tx, rx) = channel();
+        self.task_rx = Some(rx);
+        thread::spawn(move || {
+            let tx_log = tx.clone();
+            let res = capture_original_artwork(&udid, &hash, move |msg| {
+                let _ = tx_log.send(BackgroundTaskMessage::Log(msg.to_string()));
+            });
+            match res {
+                Ok(n) => {
+                    let _ = tx.send(BackgroundTaskMessage::Done(Ok(format!(
+                        "Saved {n} original asset(s). Restore original is now available."
+                    ))));
+                }
+                Err(e) => {
+                    let _ = tx.send(BackgroundTaskMessage::Done(Err(format!("{:#}", e))));
+                }
+            }
+        });
+    }
+
+    fn restore_original_card(&mut self) {
+        let Some(udid) = self.selected_udid.clone() else {
+            self.status_msg = "Please select a connected iPhone.".to_string();
+            return;
+        };
+        let hash = self.card_hash.trim().to_string();
+        if hash.is_empty() {
+            self.status_msg = "Please enter or scan a target card hash.".to_string();
+            return;
+        }
+        if !original_backup_exists(&udid, &hash) {
+            self.status_msg = "No original backup. Save original before the first skin.".to_string();
+            return;
+        }
+        self.is_busy = true;
+        self.progress_step = 0;
+        self.progress_total = 4;
+        self.progress_msg = "Restoring original artwork...".to_string();
+        self.status_msg = "Writing original card art...".to_string();
+        self.add_log(format!("Restoring original artwork for {hash}"));
+        self.refresh_guard();
+        let (tx, rx) = channel();
+        self.task_rx = Some(rx);
+        thread::spawn(move || {
+            let tx_progress = tx.clone();
+            let tx_log = tx.clone();
+            let res = restore_original_artwork(
+                &udid,
+                &hash,
+                move |step, total, msg| {
+                    let _ = tx_progress.send(BackgroundTaskMessage::Progress {
+                        step,
+                        total,
+                        message: msg.to_string(),
+                    });
+                },
+                move |msg| {
+                    let _ = tx_log.send(BackgroundTaskMessage::Log(msg.to_string()));
+                },
+            );
+            match res {
+                Ok(()) => {
+                    let _ = tx.send(BackgroundTaskMessage::Done(Ok(
+                        "Original artwork restored. Force-close Wallet and reopen.".into(),
+                    )));
+                }
+                Err(e) => {
+                    let _ = tx.send(BackgroundTaskMessage::Done(Err(format!("{:#}", e))));
+                }
+            }
+        });
     }
 
     fn start_wallet_flash(&mut self, udid: String, hash: String, art: WalletArt) {
@@ -861,6 +1134,11 @@ pub mod md3 {
     pub const SUCCESS: Color32 = Color32::from_rgb(120, 220, 120);
 }
 
+fn png_pair_from_3x(png_3x: Vec<u8>) -> WalletArt {
+    let png_2x = png_2x_from_3x(&png_3x).unwrap_or_else(|_| png_3x.clone());
+    WalletArt::Png { png_3x, png_2x }
+}
+
 fn draw_status_dot(ui: &mut egui::Ui, color: egui::Color32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
     ui.painter().circle_filled(rect.center(), 4.0, color);
@@ -976,13 +1254,22 @@ fn m3_tab(ui: &mut egui::Ui, current: &mut AppTab, target: AppTab, label: &str) 
 impl eframe::App for AirCardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_messages();
+        self.handle_skin_prep(ctx);
+
+        if let Some(since) = self.crop_dirty_since {
+            if since.elapsed() >= std::time::Duration::from_millis(160) {
+                self.reframe_skin(ctx);
+            } else {
+                ctx.request_repaint();
+            }
+        }
 
         if self.last_guard_check.elapsed().as_secs() >= 3 {
             self.blocking_apps = host_guard::blocking_sync_apps();
             self.last_guard_check = std::time::Instant::now();
         }
 
-        if self.is_busy || self.scanning_syslog {
+        if self.is_busy || self.scanning_syslog || self.preparing_skin {
             ctx.request_repaint();
         }
 
@@ -1004,7 +1291,7 @@ impl eframe::App for AirCardApp {
                             .color(md3::ON_SURFACE),
                     );
                     ui.label(
-                        egui::RichText::new("v1.3.1")
+                        egui::RichText::new("v1.3.2")
                             .size(11.0)
                             .color(md3::ON_SURFACE_VARIANT),
                     );
@@ -1199,6 +1486,7 @@ impl AirCardApp {
                         ui.vertical(|ui| {
                             ui.label(egui::RichText::new(t.scanning).strong().size(13.0).color(md3::ON_TERTIARY_CONTAINER));
                             ui.label(egui::RichText::new(t.scanning_hint).size(11.5).color(md3::ON_TERTIARY_CONTAINER));
+                            ui.label(egui::RichText::new(t.transit_hint).size(10.5).color(md3::ON_TERTIARY_CONTAINER));
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let btn = egui::Button::new(egui::RichText::new(t.stop).size(12.0).color(md3::ON_SURFACE))
@@ -1288,11 +1576,18 @@ impl AirCardApp {
                 if self.pdf_bytes.is_some() {
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new("PDF → cardBackgroundCombined.pdf").size(11.0).color(md3::PRIMARY));
-                } else if let Some(skin) = &self.skin {
+                } else if self.source_path.is_some() {
                     ui.add_space(4.0);
                     let fname = self.source_path.as_ref()
                         .and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("image");
-                    ui.label(egui::RichText::new(format!("{} - 1536x969 - {:.0} KB", fname, skin.png.len() as f32 / 1024.0)).size(11.0).color(md3::PRIMARY));
+                    if let Some(skin) = &self.skin {
+                        ui.label(egui::RichText::new(format!("{} — @3x 1536×969 / @2x 1024×646 — {:.0} KB", fname, skin.png.len() as f32 / 1024.0)).size(11.0).color(md3::PRIMARY));
+                    } else if self.preparing_skin {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(egui::RichText::new(format!("{fname} — preparing…")).size(11.0).color(md3::PRIMARY));
+                        });
+                    }
                     ui.add_space(8.0);
                     ui.label(egui::RichText::new(t.crop).size(11.0).color(md3::ON_SURFACE_VARIANT));
                     let mut crop_changed = false;
@@ -1300,7 +1595,7 @@ impl AirCardApp {
                     crop_changed |= ui.add(egui::Slider::new(&mut self.crop_pan_x, -1.0..=1.0).text(t.pan_x)).changed();
                     crop_changed |= ui.add(egui::Slider::new(&mut self.crop_pan_y, -1.0..=1.0).text(t.pan_y)).changed();
                     if crop_changed {
-                        self.reframe_skin(ctx);
+                        self.crop_dirty_since = Some(std::time::Instant::now());
                     }
                 }
 
@@ -1324,13 +1619,32 @@ impl AirCardApp {
                     let mut r = Vec::new();
                     if self.selected_udid.is_none() { r.push("connect iPhone"); }
                     if self.card_hash.trim().is_empty() { r.push("enter card hash"); }
-                    if self.skin.is_none() && self.pdf_bytes.is_none() { r.push("choose image"); }
+                    if self.skin.is_none() && self.pdf_bytes.is_none() {
+                        r.push(if self.preparing_skin {
+                            "wait for image encode"
+                        } else {
+                            "choose image"
+                        });
+                    }
                     if !r.is_empty() { resp.on_disabled_hover_text(format!("Need: {}", r.join(", "))); }
                 }
 
                 ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let can_io = !self.is_busy && self.selected_udid.is_some() && !self.card_hash.trim().is_empty();
+                    let has_orig = self.selected_udid.as_ref().is_some_and(|u| {
+                        original_backup_exists(u, self.card_hash.trim())
+                    });
+                    if ui.add_enabled(can_io, egui::Button::new(egui::RichText::new(t.save_original).size(12.0).color(md3::ON_SECONDARY_CONTAINER)).fill(md3::SECONDARY_CONTAINER).corner_radius(20).stroke(egui::Stroke::NONE)).clicked() {
+                        self.save_original_card();
+                    }
+                    if ui.add_enabled(can_io && has_orig, egui::Button::new(egui::RichText::new(t.restore_original).size(12.0).color(md3::ON_SECONDARY_CONTAINER)).fill(md3::SECONDARY_CONTAINER).corner_radius(20).stroke(egui::Stroke::NONE)).clicked() {
+                        self.restore_original_card();
+                    }
+                });
+                ui.add_space(4.0);
                 let can_revert = !self.is_busy && self.selected_udid.is_some() && !self.card_hash.trim().is_empty();
-                if ui.add_enabled(can_revert, egui::Button::new(egui::RichText::new(t.revert).size(12.0).color(md3::ON_SECONDARY_CONTAINER)).fill(md3::SECONDARY_CONTAINER).corner_radius(20).stroke(egui::Stroke::NONE)).clicked() {
+                if ui.add_enabled(can_revert, egui::Button::new(egui::RichText::new(t.revert).size(12.0).color(md3::ON_SURFACE_VARIANT)).fill(md3::SURFACE_CONTAINER_HIGH).corner_radius(20).stroke(egui::Stroke::NONE)).clicked() {
                     self.revert_card();
                 }
 
@@ -1362,6 +1676,10 @@ impl AirCardApp {
                         painter.rect_stroke(rect, 16.0,
                             egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(255, 255, 255, 30)),
                             egui::StrokeKind::Inside);
+                    } else if self.preparing_skin {
+                        painter.rect_filled(rect, 16.0, md3::SURFACE_CONTAINER_HIGH);
+                        painter.text(rect.center(), egui::Align2::CENTER_CENTER,
+                            "Preparing preview…", egui::FontId::proportional(14.0), md3::PRIMARY);
                     } else if self.pdf_bytes.is_some() {
                         painter.rect_filled(rect, 16.0, md3::SURFACE_CONTAINER_HIGH);
                         painter.text(rect.center(), egui::Align2::CENTER_CENTER,
@@ -1381,6 +1699,8 @@ impl AirCardApp {
                     ui.label(egui::RichText::new("|").size(11.0).color(md3::OUTLINE_VARIANT));
                     if self.skin.is_some() || self.pdf_bytes.is_some() {
                         ui.label(egui::RichText::new(t.ready).size(11.0).color(md3::SUCCESS));
+                    } else if self.preparing_skin {
+                        ui.label(egui::RichText::new("Preparing…").size(11.0).color(md3::PRIMARY));
                     } else {
                         ui.label(egui::RichText::new("No image").size(11.0).color(md3::ON_SURFACE_VARIANT));
                     }
@@ -1576,6 +1896,7 @@ impl AirCardApp {
     }
 
     fn show_help_tab(&mut self, ui: &mut egui::Ui) {
+        let t = i18n::t(self.lang);
         ui.columns(2, |cols| {
             let left = &mut cols[0];
             m3_card(left, |ui| {
@@ -1598,6 +1919,7 @@ impl AirCardApp {
                 ui.label(egui::RichText::new("1. Click \"Scan\" in the Wallet tab").size(11.5).color(md3::ON_SURFACE_VARIANT));
                 ui.label(egui::RichText::new("2. Open Apple Wallet on your iPhone").size(11.5).color(md3::ON_SURFACE_VARIANT));
                 ui.label(egui::RichText::new("3. Tap the card you want to customize").size(11.5).color(md3::ON_SURFACE_VARIANT));
+                ui.label(egui::RichText::new(format!("   {}", t.transit_hint)).size(11.5).color(md3::ON_SURFACE_VARIANT));
                 ui.label(egui::RichText::new("4. AirCard captures the pass hash automatically").size(11.5).color(md3::ON_SURFACE_VARIANT));
                 ui.label(egui::RichText::new("5. Click \"Stop\" once detected").size(11.5).color(md3::ON_SURFACE_VARIANT));
             });
@@ -1611,6 +1933,7 @@ impl AirCardApp {
 
                 ui.label(egui::RichText::new("Activating Apple Wallet Skin").strong().size(12.0).color(md3::ON_SURFACE));
                 ui.add_space(6.0);
+                ui.label(egui::RichText::new("0. Click \"Save original\" once before the first skin (never overwritten)").size(11.5).color(md3::ON_SURFACE_VARIANT));
                 ui.label(egui::RichText::new("1. Click \"Apply Card Skin\" and wait for completion").size(11.5).color(md3::ON_SURFACE_VARIANT));
                 ui.label(egui::RichText::new("2. Open App Switcher on iPhone (swipe up from bottom)").size(11.5).color(md3::ON_SURFACE_VARIANT));
                 ui.label(egui::RichText::new("3. Force close Apple Wallet by swiping up on it").size(11.5).color(md3::ON_SURFACE_VARIANT));

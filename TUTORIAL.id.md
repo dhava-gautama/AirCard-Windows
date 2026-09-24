@@ -8,6 +8,8 @@ Ganti gambar kartu Apple Pay / Apple Cash dan tema tombol kode sandi iPhone **ta
 
 **Bisa**
 - Ganti artwork kartu di Apple Wallet
+- **Simpan asli** / **Pulihkan asli** (ekspor Airlift; cadangan tidak pernah ditimpa)
+- Ukuran Wallet benar: @3x 1536×969 dan @2x **1024×646**
 - Pasang tema keypad `.passthm` (Cowabunga / Nugget)
 - iPhone tersambung USB ke PC Windows 10/11 64-bit
 
@@ -43,10 +45,12 @@ File hasil: `target\release\aircard.exe`.
 3. Di iPhone:
    - Buka **Wallet**, atau klik dua kali tombol samping untuk Apple Pay.
    - Ketuk kartu yang ingin diubah.
+   - Kartu transit di iOS 27: buka kartu → **…** → **Detail Kartu** → **Nyalakan Mode Layanan**, lalu Scan.
    - AirCard menyimpan hash kartu. Klik **Stop**.
-4. **Choose Image...** — PNG, JPG, WebP, atau PDF. Geser zoom/pan jika perlu. Kartu tersimpan bisa diganti nama; **Pasang gambar terakhir** membuka file yang tadi dipakai.
-5. **Pasang kulit kartu**. **Kembalikan kulit AirCard terakhir** memakai PNG sebelumnya yang disimpan aplikasi (pasang dua kali supaya ada salinan lama).
-6. Di iPhone, **paksa tutup Wallet** (App Switcher: geser Wallet ke atas) lalu buka lagi.
+4. Klik **Simpan asli** **sebelum** kulit pertama. Cadangan per perangkat ada di `%LOCALAPPDATA%\AirCard\wallet-originals` dan tidak pernah ditimpa. **Pulihkan asli** mengembalikan artwork Apple itu. **Kembalikan kulit AirCard terakhir** hanya membatalkan PNG AirCard sebelumnya.
+5. **Choose Image...** — PNG, JPG, WebP, atau PDF. Geser zoom/pan jika perlu. Kartu tersimpan bisa diganti nama; **Pasang gambar terakhir** membuka file yang tadi dipakai.
+6. **Pasang kulit kartu**. Tulisan memakai @3x 1536×969 dan @2x 1024×646, lalu memindahkan cache `FrontFace` / `PlaceHolder` / `Preview` agar iOS 27 tidak menampilkan pratinjau lama.
+7. Di iPhone, **paksa tutup Wallet** (App Switcher: geser Wallet ke atas) lalu buka lagi.
 
 ### Lewat command line
 
@@ -54,6 +58,8 @@ File hasil: `target\release\aircard.exe`.
 .\aircard.exe --probe
 .\aircard.exe --flash "HASH_KARTU_DI_SINI" "D:\gambar.png"
 .\aircard.exe --flash "HASH_KARTU_DI_SINI" "D:\suica.pdf"
+.\aircard.exe --save-original "HASH_KARTU_DI_SINI"
+.\aircard.exe --restore-original "HASH_KARTU_DI_SINI"
 .\aircard.exe --passcode "D:\tema.passthm"
 ```
 
@@ -79,7 +85,9 @@ Hash contoh terlihat seperti `k6pyiSrrP1J2v3t51G1sEDDnOZo=` (hasil Scan, bukan n
 | iPhone tidak terdeteksi | Kabel lain, Trust ulang, pastikan layanan Apple Mobile Device berjalan |
 | `SyncAllowed` tidak muncul | Buka kunci, layar nyala, buka **Buku** sekali |
 | SyncFailed / timeout 35 detik | Pakai build fork ini (bukan `aircard.exe` rilis Lumid-Off lama). Tutup iTunes / Apple Devices. Jalankan `--probe` dulu |
-| Kulit tidak kelihatan | Paksa tutup Wallet, atau reboot iPhone |
+| Kulit tidak kelihatan | Paksa tutup Wallet, atau reboot iPhone. Di iOS 27 cache wajah dipindah, bukan ditimpa |
+| Hash kartu transit tidak ketemu | Wallet → kartu → … → Detail Kartu → Nyalakan Mode Layanan, lalu Pindai |
+| Pulihkan asli tidak aktif | Klik **Simpan asli** sebelum kulit kustom pertama |
 | Tema passcode tidak kelihatan | Kunci layar ulang; pastikan cache `--white-bold` ikut (build 1.3+) |
 
 Kalau iPhone masih tidak muncul, driver USB Apple di Windows sering rusak. Langkah opsional:

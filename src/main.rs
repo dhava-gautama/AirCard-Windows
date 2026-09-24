@@ -13,6 +13,7 @@ mod image_skin;
 mod keypad;
 mod passthm;
 mod scanner;
+mod wallet_backup;
 
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -38,6 +39,24 @@ fn main() -> eframe::Result<()> {
             }
         }
     }
+    if args.len() >= 3 && args[1] == "--save-original" {
+        match cli_save_original(&args[2]) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                eprintln!("Error: {e:#}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if args.len() >= 3 && args[1] == "--restore-original" {
+        match cli_restore_original(&args[2]) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                eprintln!("Error: {e:#}");
+                std::process::exit(1);
+            }
+        }
+    }
     if args.len() >= 3 && args[1] == "--passcode" {
         let telephony = args.get(3).map(String::as_str);
         let language = args.get(4).map(String::as_str);
@@ -54,12 +73,12 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([960.0, 680.0])
             .with_min_inner_size([850.0, 560.0])
-            .with_title("AirCard v1.3.1"),
+            .with_title("AirCard v1.3.2"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "AirCard v1.3.1",
+        "AirCard v1.3.2",
         options,
         Box::new(|cc| Ok(Box::new(app::AirCardApp::new(cc)))),
     )
@@ -136,23 +155,8 @@ fn cleanup_books(udid: &str) -> anyhow::Result<()> {
     println!("cleanup   = clearing leftover Books/airlift staging...");
     let session = device::ActiveDeviceSession::open(Some(udid))?;
     let afc = afc::AfcClient::new(&session)?;
-    for path in airlift::TRACKED_BOOKS_FILES {
-        if afc.exists(path) {
-            println!("cleanup   = remove {path}");
-            let _ = afc.remove_path(path);
-        }
-    }
-    if let Ok(entries) = afc.list_directory(".") {
-        for name in entries {
-            if name.starts_with("airlift-src-")
-                || name.starts_with("airlift-link-")
-                || name.starts_with("airlift-recovered-")
-            {
-                println!("cleanup   = remove tree {name}");
-                let _ = afc.remove_tree(&name);
-            }
-        }
-    }
+    let n = airlift::cleanup_airlift_staging(&afc, |msg| println!("cleanup   = {msg}"));
+    println!("cleanup   = {n} leftover path(s) removed");
     Ok(())
 }
 
@@ -177,12 +181,16 @@ fn cli_flash(card_hash: &str, image_path: &str) -> anyhow::Result<()> {
     } else {
         let skin = image_skin::PreparedSkin::from_path(path)?;
         println!(
-            "skin      = {}x{} -> 1536x969 png={} bytes",
+            "skin      = {}x{} -> 1536x969 @3x={} bytes, 1024x646 @2x={} bytes",
             skin.source_width,
             skin.source_height,
-            skin.png.len()
+            skin.png.len(),
+            skin.png_2x.len()
         );
-        flasher::WalletArt::Png(skin.png)
+        flasher::WalletArt::Png {
+            png_3x: skin.png,
+            png_2x: skin.png_2x,
+        }
     };
 
     println!("Keep iPhone UNLOCKED, screen ON. Open Books once if prompted.");
@@ -192,6 +200,43 @@ fn cli_flash(card_hash: &str, image_path: &str) -> anyhow::Result<()> {
         &udid,
         card_hash,
         &art,
+        |step, total, msg| println!("progress [{step}/{total}] {msg}"),
+        |msg| println!("log: {msg}"),
+    )?;
+
+    println!("DONE — force-close Wallet on iPhone and reopen.");
+    Ok(())
+}
+
+fn cli_save_original(card_hash: &str) -> anyhow::Result<()> {
+    println!("=== AirCard CLI save original ===");
+    println!("card_hash = {card_hash}");
+    warn_blocking_apps();
+
+    let udid = first_udid()?;
+    cleanup_books(&udid)?;
+    println!("Keep iPhone UNLOCKED, screen ON. Open Books once if prompted.");
+    println!("Exporting original artwork via Airlift (writes each file back)...");
+
+    let saved = flasher::capture_original_artwork(&udid, card_hash, |msg| println!("log: {msg}"))?;
+    let dir = wallet_backup::backup_dir(&udid, card_hash);
+    println!("DONE — saved {saved} original asset(s) under {}", dir.display());
+    Ok(())
+}
+
+fn cli_restore_original(card_hash: &str) -> anyhow::Result<()> {
+    println!("=== AirCard CLI restore original ===");
+    println!("card_hash = {card_hash}");
+    warn_blocking_apps();
+
+    let udid = first_udid()?;
+    cleanup_books(&udid)?;
+    println!("Keep iPhone UNLOCKED, screen ON. Open Books once if prompted.");
+    println!("Writing backed-up original artwork...");
+
+    flasher::restore_original_artwork(
+        &udid,
+        card_hash,
         |step, total, msg| println!("progress [{step}/{total}] {msg}"),
         |msg| println!("log: {msg}"),
     )?;

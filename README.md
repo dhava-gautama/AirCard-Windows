@@ -18,6 +18,9 @@ Verified on **iPhone 18,2 / iOS 26.6** over USB.
 ## Features
 
 - Custom Apple Pay / Apple Cash card artwork (PNG / JPG / WebP / **PDF** for Suica-style art)
+- Distinct Wallet sizes: **@3x 1536×969** and **@2x 1024×646** (not a copy of @3x)
+- **Save original** / **Restore original** (Airlift export into `%LOCALAPPDATA%\AirCard\wallet-originals`; never overwrites a saved original). **Revert last AirCard skin** is a different action — it only restores the previous skin this app wrote.
+- iOS 27 cache invalidation: relocate `FrontFace` / `PlaceHolder` / `Preview` out of the pass cache so Wallet rebuilds (do not overwrite those files with dummy bytes)
 - Pan / zoom crop before flash
 - Named saved cards, last-image reapply, revert previous AirCard skin
 - Cowabunga / Nugget `.passthm` lockscreen keypad themes, including **Bold Text** (`--white-bold`) caches
@@ -53,6 +56,8 @@ CLI:
 .\target\release\aircard.exe --probe
 .\target\release\aircard.exe --flash "CARD_HASH" "D:\art.png"
 .\target\release\aircard.exe --flash "CARD_HASH" "D:\suica.pdf"
+.\target\release\aircard.exe --save-original "CARD_HASH"
+.\target\release\aircard.exe --restore-original "CARD_HASH"
 .\target\release\aircard.exe --passcode "D:\theme.passthm"
 .\target\release\aircard.exe --passcode "D:\theme.passthm" TelephonyUI-10 English
 ```
@@ -66,10 +71,11 @@ Run `aircard.exe --probe` from PowerShell or cmd with one USB-connected, unlocke
 ## Wallet skins
 
 1. USB, unlocked, **Trust this Computer**.
-2. Wallet tab → **Scan**. Open Wallet (or double-click Side button), tap the card, **Stop**.
-3. **Choose Image...** (PNG / JPG / WebP / PDF). Use the frame sliders to pan/zoom. Saved cards can be renamed; **Apply last image** reloads the path you used last.
-4. **Apply Card Skin**. **Revert last AirCard skin** restores the previous PNG this app stored for that hash (apply twice to have a previous copy).
-5. Force-close Wallet on the iPhone and reopen it.
+2. Wallet tab → **Scan**. Open Wallet (or double-click Side button), tap the card, **Stop**. Transit cards on iOS 27 often hide the pass id unless you open the card → **…** → **Card Details** → **Turn on Service Mode**, then Scan.
+3. **Save original** once **before** the first skin. That copies the Apple artwork via Airlift; later saves are skipped so the backup is never overwritten. **Restore original** writes that backup back. **Revert last AirCard skin** only undoes the previous AirCard PNG.
+4. **Choose Image...** (PNG / JPG / WebP / PDF). Use the frame sliders to pan/zoom. Saved cards can be renamed; **Apply last image** reloads the path you used last.
+5. **Apply Card Skin**. The write uses a real @2x (1024×646) plus @3x, then moves Wallet cache faces so iOS 27 does not keep a stale preview.
+6. Force-close Wallet on the iPhone and reopen it.
 
 ## Passcode themes
 
@@ -85,7 +91,10 @@ Run `aircard.exe --probe` from PowerShell or cmd with one USB-connected, unlocke
 | No device | Cable, Trust, Apple Mobile Device Service running |
 | Stuck on SyncAllowed | Unlocked screen, open Books once |
 | SyncFailed / 35s timeout | This fork, not the old Lumid-Off release; quit iTunes; run `--probe` first |
-| Skin not visible | Force-close Wallet or reboot |
+| Skin not visible | Force-close Wallet or reboot; iOS 27 cache faces are moved, not overwritten |
+| StreamingZip / `kAMDEOFError` / send failed | Leftover Books staging after Save original. Retry; this build cleans staging first and resends the zip in 32 KiB chunks |
+| Transit hash not found | Wallet → card → … → Card Details → Turn on Service Mode, then Scan |
+| Restore original disabled | Click **Save original** before the first custom skin |
 
 If the iPhone is still missing after that, Apple USB drivers on Windows are often the cause. Optional last resort:
 

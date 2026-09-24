@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::ptr;
+use std::thread::sleep;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
@@ -272,7 +274,69 @@ pub fn restore_books(afc: &AfcClient, snapshot: &BooksSnapshot) -> Result<()> {
     Ok(())
 }
 
+/// Remove leftover airlift staging dirs and Books sync files from a previous run.
+pub fn cleanup_airlift_staging<L>(afc: &AfcClient, mut log: L) -> usize
+where
+    L: FnMut(&str),
+{
+    let mut removed = 0usize;
+    for path in TRACKED_BOOKS_FILES {
+        if afc.exists(path) {
+            log(&format!("cleanup leftover {path}"));
+            if afc.remove_path(path).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    if let Ok(entries) = afc.list_directory(".") {
+        for name in entries {
+            if name.starts_with(SOURCE_PREFIX)
+                || name.starts_with(LINK_PREFIX)
+                || name.starts_with(RECOVERED_PREFIX)
+            {
+                log(&format!("cleanup leftover tree {name}"));
+                if afc.remove_tree(&name).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+    }
+    removed
+}
+
+fn format_amd_status(code: i32) -> String {
+    let name = match code as u32 {
+        0xE8000004 => "kAMDReadError",
+        0xE8000005 => "kAMDWriteError",
+        0xE800000B => "kAMDNotConnectedError",
+        0xE800000C => "kAMDTimeOutError",
+        0xE800000E => "kAMDEOFError",
+        _ => "AMDError",
+    };
+    format!("{name} ({code})")
+}
+
 pub fn stage_streaming_zip(
+    session: &ActiveDeviceSession,
+    source_subdir: &str,
+    archive: &[u8],
+) -> Result<()> {
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 1..=3 {
+        match stage_streaming_zip_once(session, source_subdir, archive) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                last_err = Some(err);
+                if attempt < 3 {
+                    sleep(Duration::from_millis(400 * attempt as u64));
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("StreamingZip staging failed")))
+}
+
+fn stage_streaming_zip_once(
     session: &ActiveDeviceSession,
     source_subdir: &str,
     archive: &[u8],
@@ -295,13 +359,16 @@ pub fn stage_streaming_zip(
             )
         };
         if status != 0 {
-            bail!("AMDServiceConnectionSendMessage failed with code {}", status);
+            bail!(
+                "AMDServiceConnectionSendMessage failed with {}",
+                format_amd_status(status)
+            );
         }
 
-        // Send streaming zip payload
+        // 32 KiB chunks: 64 KiB sends often EOF the Windows MobileDevice SSL conduit.
         let mut sent = 0;
         while sent < archive.len() {
-            let chunk_size = std::cmp::min(65536, archive.len() - sent);
+            let chunk_size = std::cmp::min(32768, archive.len() - sent);
             let s = unsafe {
                 (libs.amd_service_connection_send)(
                     zip_service,
@@ -347,7 +414,10 @@ pub fn stage_streaming_zip(
         }
 
         if recv_status != 0 {
-            bail!("StreamingZip conduit returned error code {}", recv_status);
+            bail!(
+                "StreamingZip conduit returned {}",
+                format_amd_status(recv_status)
+            );
         }
 
         Ok(())
