@@ -16,6 +16,20 @@ mod scanner;
 
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    if let Some(valid_args) = probe_command(&args) {
+        attach_probe_console();
+        if !valid_args {
+            eprintln!("Usage: aircard.exe --probe");
+            std::process::exit(2);
+        }
+        match cli_probe() {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                eprintln!("Error: {e:#}");
+                std::process::exit(1);
+            }
+        }
+    }
     if args.len() >= 4 && args[1] == "--flash" {
         match cli_flash(&args[2], &args[3]) {
             Ok(()) => return Ok(()),
@@ -52,6 +66,24 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+#[cfg(windows)]
+fn attach_probe_console() {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn AttachConsole(process_id: u32) -> i32;
+    }
+
+    // GUI-subsystem processes have no console by default. Attach only for --probe.
+    unsafe { AttachConsole(u32::MAX) };
+}
+
+#[cfg(not(windows))]
+fn attach_probe_console() {}
+
+fn probe_command(args: &[String]) -> Option<bool> {
+    (args.get(1).map(String::as_str) == Some("--probe")).then_some(args.len() == 2)
+}
+
 fn warn_blocking_apps() {
     let apps = host_guard::blocking_sync_apps();
     if !apps.is_empty() {
@@ -71,6 +103,23 @@ fn first_udid() -> anyhow::Result<String> {
         println!("device    = {d}  udid={}", d.udid);
     }
     Ok(devices[0].udid.clone())
+}
+
+fn cli_probe() -> anyhow::Result<()> {
+    // Only query the local usbmux device list. Do not open AFC or run cleanup_books.
+    let mut usb_devices = device::query_usbmux_devices()?
+        .into_iter()
+        .filter(|d| d.connection_type.eq_ignore_ascii_case("USB"));
+    let Some(device) = usb_devices.next() else {
+        anyhow::bail!("No USB-connected iPhone found for handshake probe");
+    };
+    if usb_devices.next().is_some() {
+        anyhow::bail!("Multiple USB devices found; probe requires exactly one");
+    }
+    println!("probe = AirTraffic handshake only; no AFC staging or Wallet asset writes");
+    airtraffic::sync_assets_via_airtraffic(&device.udid, &[], |msg| println!("log: {msg}"))?;
+    println!("probe DONE — ReadyForSync received");
+    Ok(())
 }
 
 fn cleanup_books(udid: &str) -> anyhow::Result<()> {
@@ -105,13 +154,6 @@ fn cli_flash(card_hash: &str, image_path: &str) -> anyhow::Result<()> {
 
     let udid = first_udid()?;
     cleanup_books(&udid)?;
-
-    if std::env::var("AIRCARD_PROBE_ONLY").as_deref() == Ok("1") {
-        println!("probe     = AirTraffic Book sync only (no staging / no Books.plist poison)");
-        airtraffic::sync_assets_via_airtraffic(&udid, &[], |msg| println!("log: {msg}"))?;
-        println!("probe DONE — ReadyForSync path works on this device/PC pair");
-        return Ok(());
-    }
 
     let path = std::path::Path::new(image_path);
     let art = if path
@@ -182,4 +224,31 @@ fn cli_passcode(
 
     println!("DONE — lock the iPhone to view the keypad (Bold Text ON or OFF).");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::probe_command;
+
+    #[test]
+    fn probe_requires_exact_cli_arguments() {
+        let args = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            probe_command(&args(&["aircard.exe", "--probe"])),
+            Some(true)
+        );
+        assert_eq!(
+            probe_command(&args(&["aircard.exe", "--probe", "extra"])),
+            Some(false)
+        );
+        assert_eq!(
+            probe_command(&args(&["aircard.exe", "--flash", "hash", "art.png"])),
+            None
+        );
+    }
 }

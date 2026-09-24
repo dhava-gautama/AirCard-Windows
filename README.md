@@ -50,11 +50,18 @@ Binary: `target\release\aircard.exe`.
 CLI:
 
 ```powershell
+.\target\release\aircard.exe --probe
 .\target\release\aircard.exe --flash "CARD_HASH" "D:\art.png"
 .\target\release\aircard.exe --flash "CARD_HASH" "D:\suica.pdf"
 .\target\release\aircard.exe --passcode "D:\theme.passthm"
 .\target\release\aircard.exe --passcode "D:\theme.passthm" TelephonyUI-10 English
 ```
+
+### AirTraffic handshake probe
+
+Run `aircard.exe --probe` from PowerShell or cmd with one USB-connected, unlocked iPhone; open Books once beforehand. The probe tests `SyncAllowed` → `RequestingSync` → `ReadyForSync` and then releases the connection. It does not run AFC cleanup, stage files, or write Wallet assets. It still sends the handshake messages to the device. The command attaches to the invoking Windows console to print progress and, on `SyncFailed`, only a numeric `ErrorCode` when available. Normal GUI launch remains windowed.
+
+**Additional single-device validation:** Manually verified on Windows with iPhone15,4 / iOS 18.7.1. Lumid-Off v1.2.2 reproduced `SyncFailed` ErrorCode 4; this fork's handshake probe reached `ReadyForSync`, and a subsequent full Wallet artwork application succeeded. This is one real-device observation, not a claim of support for every iOS 18.x device or version. The Grappa handshake fix was already present in this fork; the probe and narrower failure logging do not introduce that fix.
 
 ## Wallet skins
 
