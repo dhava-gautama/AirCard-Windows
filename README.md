@@ -74,7 +74,7 @@ Run `aircard.exe --probe` from PowerShell or cmd with one USB-connected, unlocke
 2. Wallet tab → **Scan**. Open Wallet (or double-click Side button), tap the card, **Stop**. Transit cards on iOS 27 often hide the pass id unless you open the card → **…** → **Card Details** → **Turn on Service Mode**, then Scan.
 3. **Save original** once **before** the first skin. That copies the Apple artwork via Airlift; later saves are skipped so the backup is never overwritten. **Restore original** writes that backup back. **Revert last AirCard skin** only undoes the previous AirCard PNG.
 4. **Choose Image...** (PNG / JPG / WebP / PDF). Use the frame sliders to pan/zoom. Saved cards can be renamed; **Apply last image** reloads the path you used last.
-5. **Apply Card Skin**. The write uses a real @2x (1024×646) plus @3x, then moves Wallet cache faces so iOS 27 does not keep a stale preview.
+5. **Apply Card Skin**. The write uses a real @2x (1024×646) plus @3x **and a PDF companion** (same as Mac AirCard), then moves Wallet cache faces so iOS 27 does not keep a stale preview.
 6. Force-close Wallet on the iPhone and reopen it.
 
 ## Passcode themes

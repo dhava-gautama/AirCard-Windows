@@ -11,6 +11,7 @@ use crate::airlift::{
 };
 use crate::airtraffic::sync_assets_via_airtraffic;
 use crate::device::ActiveDeviceSession;
+use crate::image_skin::png_to_pdf;
 use crate::wallet_backup::{self, ORIGINAL_ASSETS};
 
 pub const TARGET_WALLET_ASSETS: &[&str] = &[
@@ -602,6 +603,18 @@ where
             let payloads: [&[u8]; 2] = [png_3x.as_slice(), png_2x.as_slice()];
             for (leaf, data) in TARGET_WALLET_ASSETS.iter().zip(payloads) {
                 items.push((pkpass_dir.clone(), (*leaf).to_string(), data.to_vec()));
+            }
+            match png_to_pdf(png_3x) {
+                Ok(pdf) => {
+                    log(&format!(
+                        "Also writing cardBackgroundCombined.pdf ({} bytes) so iOS 27 cannot keep a leftover PDF face",
+                        pdf.len()
+                    ));
+                    for asset in TARGET_WALLET_PDF {
+                        items.push((pkpass_dir.clone(), (*asset).to_string(), pdf.clone()));
+                    }
+                }
+                Err(err) => log(&format!("PDF companion skipped: {err:#}")),
             }
         }
         WalletArt::Pdf(pdf) => {

@@ -96,6 +96,64 @@ pub fn encode_wallet_pngs(rgba: &RgbaImage) -> Result<(Vec<u8>, Vec<u8>)> {
     Ok((png, png_2x))
 }
 
+/// Wallet often keeps a PDF face next to the PNGs. Mac AirCard / Lumid-Off always
+/// write this on a PNG flash so iOS 27 does not rebuild from a leftover PDF.
+pub fn png_to_pdf(png_bytes: &[u8]) -> Result<Vec<u8>> {
+    let img = image::load_from_memory(png_bytes).context("Failed to decode image for PDF conversion")?;
+    let rgb = img.to_rgb8();
+    let width = rgb.width();
+    let height = rgb.height();
+    let compressed = miniz_oxide::deflate::compress_to_vec_zlib(rgb.as_raw(), 6);
+
+    let mut pdf = Vec::new();
+    pdf.extend_from_slice(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n");
+
+    let mut offsets = Vec::new();
+
+    offsets.push(pdf.len());
+    pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    offsets.push(pdf.len());
+    pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    offsets.push(pdf.len());
+    let page_obj = format!(
+        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] /Contents 4 0 R /Resources << /XObject << /Im0 5 0 R >> >> >>\nendobj\n"
+    );
+    pdf.extend_from_slice(page_obj.as_bytes());
+
+    offsets.push(pdf.len());
+    let content_stream = format!("q\n{width} 0 0 {height} 0 0 cm\n/Im0 Do\nQ\n");
+    let contents_obj = format!(
+        "4 0 obj\n<< /Length {} >>\nstream\n{content_stream}endstream\nendobj\n",
+        content_stream.len()
+    );
+    pdf.extend_from_slice(contents_obj.as_bytes());
+
+    offsets.push(pdf.len());
+    let image_header = format!(
+        "5 0 obj\n<< /Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length {} >>\nstream\n",
+        compressed.len()
+    );
+    pdf.extend_from_slice(image_header.as_bytes());
+    pdf.extend_from_slice(&compressed);
+    pdf.extend_from_slice(b"\nendstream\nendobj\n");
+
+    let xref_offset = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n", offsets.len() + 1).as_bytes());
+    pdf.extend_from_slice(b"0000000000 65535 f \n");
+    for &off in &offsets {
+        pdf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+    }
+
+    let trailer = format!(
+        "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+        offsets.len() + 1
+    );
+    pdf.extend_from_slice(trailer.as_bytes());
+    Ok(pdf)
+}
+
 fn encode_png_fast(rgba: &RgbaImage) -> Result<Vec<u8>> {
     let mut png = Vec::new();
     PngEncoder::new_with_quality(&mut png, CompressionType::Fast, PngFilter::Adaptive)
@@ -189,5 +247,19 @@ mod tests {
         let (png, png_2x) = encode_wallet_pngs(&fast).unwrap();
         assert!(png.starts_with(b"\x89PNG"));
         assert!(png_2x.starts_with(b"\x89PNG"));
+    }
+
+    #[test]
+    fn png_to_pdf_writes_valid_pdf() {
+        let img = DynamicImage::new_rgb8(10, 10);
+        let mut png = Vec::new();
+        img.write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
+            .unwrap();
+        let pdf = png_to_pdf(&png).expect("png_to_pdf failed");
+        assert!(pdf.starts_with(b"%PDF-1.4"));
+        assert!(pdf.windows(6).any(|w| w == b"%%EOF\n"));
+        let pdf_str = String::from_utf8_lossy(&pdf);
+        assert!(pdf_str.contains("/FlateDecode"));
+        assert!(pdf_str.contains("/MediaBox [0 0 10 10]"));
     }
 }

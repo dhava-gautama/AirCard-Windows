@@ -73,12 +73,12 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([960.0, 680.0])
             .with_min_inner_size([850.0, 560.0])
-            .with_title("AirCard v1.3.2"),
+            .with_title("AirCard v1.3.3"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "AirCard v1.3.2",
+        "AirCard v1.3.3",
         options,
         Box::new(|cc| Ok(Box::new(app::AirCardApp::new(cc)))),
     )

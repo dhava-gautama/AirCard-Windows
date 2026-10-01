@@ -207,7 +207,7 @@ impl AirCardApp {
             show_logs_window: false,
         };
 
-        app.add_log("AirCard Windows v1.3.2 initialized");
+        app.add_log("AirCard Windows v1.3.3 initialized");
         app.add_log(format!("Apple Support Runtime: {}", if app.apple_ready { "Loaded and operational" } else { "Not found (iTunes required)" }));
         app.add_log(format!("Loaded {} saved card(s) from database", app.saved_cards.len()));
 
@@ -1291,7 +1291,7 @@ impl eframe::App for AirCardApp {
                             .color(md3::ON_SURFACE),
                     );
                     ui.label(
-                        egui::RichText::new("v1.3.2")
+                        egui::RichText::new("v1.3.3")
                             .size(11.0)
                             .color(md3::ON_SURFACE_VARIANT),
                     );
