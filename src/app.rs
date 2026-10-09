@@ -24,6 +24,8 @@ use crate::scanner::{
     SavedCard, load_saved_cards, rename_card, scan_syslog_for_cards, set_card_last_image,
 };
 
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(PartialEq, Eq)]
 enum AppTab {
     Wallet,
@@ -207,7 +209,7 @@ impl AirCardApp {
             show_logs_window: false,
         };
 
-        app.add_log("AirCard Windows v1.3.3 initialized");
+        app.add_log(format!("AirCard Windows v{APP_VERSION} initialized"));
         app.add_log(format!("Apple Support Runtime: {}", if app.apple_ready { "Loaded and operational" } else { "Not found (iTunes required)" }));
         app.add_log(format!("Loaded {} saved card(s) from database", app.saved_cards.len()));
 
@@ -1291,7 +1293,7 @@ impl eframe::App for AirCardApp {
                             .color(md3::ON_SURFACE),
                     );
                     ui.label(
-                        egui::RichText::new("v1.3.3")
+                        egui::RichText::new(format!("v{APP_VERSION}"))
                             .size(11.0)
                             .color(md3::ON_SURFACE_VARIANT),
                     );

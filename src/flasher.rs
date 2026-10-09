@@ -380,6 +380,36 @@ where
     Ok(())
 }
 
+fn remove_cache_leaves<L>(udid: &str, cache_dir: &str, mut log: L) -> Result<()>
+where
+    L: FnMut(&str),
+{
+    match remove_system_files(udid, cache_dir, CACHE_FILES, &mut log) {
+        Ok(()) => Ok(()),
+        Err(batch_err) => {
+            if CACHE_FILES.len() <= 1 {
+                return Err(batch_err);
+            }
+            log(&format!(
+                "Batch cache move failed ({batch_err:#}); retrying each face (missing PlaceHolder/Preview is OK)..."
+            ));
+            let mut moved_any = false;
+            let mut last_err = batch_err;
+            for leaf in CACHE_FILES {
+                match remove_system_files(udid, cache_dir, std::slice::from_ref(leaf), &mut log) {
+                    Ok(()) => moved_any = true,
+                    Err(err) => last_err = err,
+                }
+            }
+            if moved_any {
+                Ok(())
+            } else {
+                Err(last_err)
+            }
+        }
+    }
+}
+
 pub fn invalidate_wallet_cache<L>(udid: &str, card_hash: &str, mut log: L) -> Result<()>
 where
     L: FnMut(&str),
@@ -387,7 +417,7 @@ where
     let mut all_ok = true;
     for ext in [".cache", ".pkcache"] {
         let cache_dir = format!("/var/mobile/Library/Passes/Cards/{card_hash}{ext}");
-        match remove_system_files(udid, &cache_dir, CACHE_FILES, &mut log) {
+        match remove_cache_leaves(udid, &cache_dir, &mut log) {
             Ok(()) => {}
             Err(err) => {
                 log(&format!(

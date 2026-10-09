@@ -69,16 +69,17 @@ fn main() -> eframe::Result<()> {
         }
     }
 
+    let title = format!("AirCard v{}", app::APP_VERSION);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([960.0, 680.0])
             .with_min_inner_size([850.0, 560.0])
-            .with_title("AirCard v1.3.3"),
+            .with_title(title.clone()),
         ..Default::default()
     };
 
     eframe::run_native(
-        "AirCard v1.3.3",
+        &title,
         options,
         Box::new(|cc| Ok(Box::new(app::AirCardApp::new(cc)))),
     )

@@ -211,6 +211,8 @@ const WALLET_KEYWORDS: &[&str] = &[
     "nanopassd",
     "npkcompanion",
     "wallet",
+    "nfcd",
+    "passids",
     "/cards/",
     "/passes/",
 ];
@@ -234,8 +236,64 @@ static CARD_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         Regex::new(r"/([A-Za-z0-9+/=_-]{27,44})\.(?:pkpass|cache|pkcache)").unwrap(),
         Regex::new(r"(?:^|[^A-Za-z0-9+/_-])([A-Za-z0-9+/_-]{27}=)(?:$|[^A-Za-z0-9+/_-])").unwrap(),
         Regex::new(r"(?i)(?:card[_\s]?(?:hash|id)|pass[_\s]?(?:hash|id)|unique[_\s]?id)\s*[:=]\s*['\x22]?([A-Za-z0-9+=_-]{27,44})").unwrap(),
+        Regex::new(r"(?i)Dashboard loading[^:]*:\s*for\s+([A-Za-z0-9+/=_-]{20,80})(?:[,\s\x22'\)]|$)").unwrap(),
+        Regex::new(r"(?i)Dashboard loading[^:]*:\s+([A-Za-z0-9+/=_-]{20,80})\s+-").unwrap(),
     ]
 });
+
+static PASS_IDS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)passIDs\[(?:InSession|global)\]\s*:\s*(?:\{\s*)?\(([^)]*)\)").unwrap()
+});
+
+fn normalize_extracted_hash(raw: &str) -> Option<String> {
+    let h = raw.trim().trim_matches(['\'', '"', '.', ',', '(', ')']);
+    if !is_valid_card_hash(h) {
+        return None;
+    }
+    let mut norm = h.to_string();
+    if norm.len() == 27 {
+        norm.push('=');
+    }
+    Some(norm)
+}
+
+pub fn extract_card_hashes_from_line(line: &str) -> Vec<String> {
+    let lower = line.to_lowercase();
+    let has_wallet = WALLET_KEYWORDS.iter().any(|k| lower.contains(k));
+    if !has_wallet {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    for caps in PASS_IDS_RE.captures_iter(line) {
+        if let Some(list) = caps.get(1) {
+            for token in list.as_str().split(|c: char| {
+                c == ',' || c == '"' || c == '\'' || c.is_whitespace()
+            }) {
+                if let Some(hash) = normalize_extracted_hash(token)
+                    && seen.insert(hash.clone())
+                {
+                    out.push(hash);
+                }
+            }
+        }
+    }
+
+    for r in CARD_REGEXES.iter() {
+        for caps in r.captures_iter(line) {
+            if let Some(m) = caps.get(1)
+                && let Some(hash) = normalize_extracted_hash(m.as_str())
+                && seen.insert(hash.clone())
+            {
+                out.push(hash);
+            }
+        }
+    }
+
+    out
+}
 
 pub fn extract_card_name_from_line(line: &str) -> Option<String> {
     if let Some(caps) = DESC_RE.captures(line) {
@@ -249,29 +307,9 @@ pub fn extract_card_name_from_line(line: &str) -> Option<String> {
     None
 }
 
+#[cfg(test)]
 pub fn extract_card_hash_from_line(line: &str) -> Option<String> {
-    let lower = line.to_lowercase();
-    let has_wallet = WALLET_KEYWORDS.iter().any(|k| lower.contains(k));
-    if !has_wallet {
-        return None;
-    }
-
-    for r in CARD_REGEXES.iter() {
-        if let Some(caps) = r.captures(line) {
-            if let Some(m) = caps.get(1) {
-                let h = m.as_str().trim().trim_matches(['\'', '"', '.', ',']);
-                if is_valid_card_hash(h) {
-                    let mut norm = h.to_string();
-                    if norm.len() == 27 {
-                        norm.push('=');
-                    }
-                    return Some(norm);
-                }
-            }
-        }
-    }
-
-    None
+    extract_card_hashes_from_line(line).into_iter().next()
 }
 
 pub fn scan_syslog_for_cards<F, L>(
@@ -332,15 +370,15 @@ where
                 if b == b'\n' || b == b'\0' {
                     if !line_acc.is_empty() {
                         let line = String::from_utf8_lossy(&line_acc);
-                        if let Some(hash) = extract_card_hash_from_line(&line) {
-                            let name = extract_card_name_from_line(&line).unwrap_or_default();
+                        let name = extract_card_name_from_line(&line).unwrap_or_default();
+                        for hash in extract_card_hashes_from_line(&line) {
                             log(format!(
                                 "Found card pass! Name: '{}', Hash: {}",
                                 if name.is_empty() { "Unknown" } else { &name },
                                 hash
                             ));
                             add_or_update_card(&hash, &name);
-                            on_card_found(hash, name);
+                            on_card_found(hash, name.clone());
                         }
                         line_acc.clear();
                     }
@@ -387,6 +425,27 @@ mod tests {
         assert_eq!(
             extract_card_hash_from_line(line3),
             Some("c5g3sMLJHXE63-5NVq-aZE81M-s=".to_string())
+        );
+
+        let dashboard = "Passbook(PassKitUI): Dashboard loading (...): for OM6NYhwXMZrAw0sRUjR62wmF4ZQ=, pass feature unknown";
+        assert_eq!(
+            extract_card_hash_from_line(dashboard),
+            Some("OM6NYhwXMZrAw0sRUjR62wmF4ZQ=".to_string())
+        );
+
+        let dashboard2 = "Passbook(PassKitUI): Dashboard loading (...): d64fKk0kyHWP11IWV2GRLud4XQk= - m:NO, sm:NO";
+        assert_eq!(
+            extract_card_hash_from_line(dashboard2),
+            Some("d64fKk0kyHWP11IWV2GRLud4XQk=".to_string())
+        );
+
+        let nfc = r#"nfcd: passIDs[InSession]: {("OM6NYhwXMZrAw0sRUjR62wmF4ZQ=")} passIDs[global]: {("d64fKk0kyHWP11IWV2GRLud4XQk=")}"#;
+        assert_eq!(
+            extract_card_hashes_from_line(nfc),
+            vec![
+                "OM6NYhwXMZrAw0sRUjR62wmF4ZQ=".to_string(),
+                "d64fKk0kyHWP11IWV2GRLud4XQk=".to_string(),
+            ]
         );
 
         // Dummy/unrelated lines should be ignored
