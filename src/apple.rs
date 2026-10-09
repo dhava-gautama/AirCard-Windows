@@ -1,6 +1,7 @@
 use std::ffi::{CStr, CString};
+use std::fs;
 use std::os::windows::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::{Arc, OnceLock};
 
@@ -11,10 +12,166 @@ unsafe extern "system" {
     fn SetDllDirectoryW(lpPathName: *const u16) -> i32;
 }
 
+// Minimal advapi32 registry bindings used to locate the Microsoft Store
+// ("Apple Devices" / Store iTunes) package that ships the device DLLs.
+type HKey = *mut std::ffi::c_void;
+const HKEY_CURRENT_USER: HKey = 0x8000_0001u32 as usize as HKey;
+const KEY_READ: u32 = 0x2_0019;
+const ERROR_SUCCESS: i32 = 0;
+const REG_SZ: u32 = 1;
+
+#[link(name = "advapi32")]
+unsafe extern "system" {
+    fn RegOpenKeyExW(
+        hKey: HKey,
+        lpSubKey: *const u16,
+        ulOptions: u32,
+        samDesired: u32,
+        phkResult: *mut HKey,
+    ) -> i32;
+    fn RegEnumKeyExW(
+        hKey: HKey,
+        dwIndex: u32,
+        lpName: *mut u16,
+        lpcchName: *mut u32,
+        lpReserved: *mut u32,
+        lpClass: *mut u16,
+        lpcchClass: *mut u32,
+        lpftLastWriteTime: *mut std::ffi::c_void,
+    ) -> i32;
+    fn RegQueryValueExW(
+        hKey: HKey,
+        lpValueName: *const u16,
+        lpReserved: *mut u32,
+        lpType: *mut u32,
+        lpData: *mut u8,
+        lpcbData: *mut u32,
+    ) -> i32;
+    fn RegCloseKey(hKey: HKey) -> i32;
+}
+
 const APPLE_SUPPORT_DIRS: &[&str] = &[
     r"C:\Program Files\Common Files\Apple\Mobile Device Support",
     r"C:\Program Files (x86)\Common Files\Apple\Mobile Device Support",
 ];
+
+const APPMODEL_PACKAGES_KEY: &str = r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages";
+const APPLE_PACKAGE_PREFIXES: &[&str] = &["AppleInc.AppleDevices", "AppleInc.iTunes"];
+
+fn to_wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Read a `REG_SZ` value from an open registry key.
+///
+/// # Safety
+/// `key` must be a valid handle opened with at least `KEY_QUERY_VALUE` access.
+unsafe fn reg_read_string(key: HKey, value_name: &str) -> Option<String> {
+    let name = to_wide(value_name);
+    let mut value_type: u32 = 0;
+    let mut size_bytes: u32 = 0;
+
+    let status = unsafe {
+        RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            ptr::null_mut(),
+            &mut value_type,
+            ptr::null_mut(),
+            &mut size_bytes,
+        )
+    };
+    if status != ERROR_SUCCESS || value_type != REG_SZ || size_bytes == 0 {
+        return None;
+    }
+
+    let mut buffer = vec![0u8; size_bytes as usize];
+    let status = unsafe {
+        RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            ptr::null_mut(),
+            &mut value_type,
+            buffer.as_mut_ptr(),
+            &mut size_bytes,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return None;
+    }
+
+    let (pairs, _) = buffer[..size_bytes as usize].as_chunks::<2>();
+    let u16_units: Vec<u16> = pairs.iter().map(|&[lo, hi]| u16::from_le_bytes([lo, hi])).collect();
+    let text = String::from_utf16_lossy(&u16_units);
+    let trimmed = text.trim_end_matches('\0');
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Discover install folders of registered MSIX packages whose name starts with
+/// one of `prefixes`, via `PackageRootFolder` in the per-user AppModel repo.
+fn msix_package_roots(prefixes: &[&str]) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    unsafe {
+        let mut repo_key: HKey = ptr::null_mut();
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            to_wide(APPMODEL_PACKAGES_KEY).as_ptr(),
+            0,
+            KEY_READ,
+            &mut repo_key,
+        ) != ERROR_SUCCESS
+        {
+            return roots;
+        }
+
+        let mut index: u32 = 0;
+        loop {
+            let mut name_buf = [0u16; 512];
+            let mut name_len = name_buf.len() as u32;
+            let status = RegEnumKeyExW(
+                repo_key,
+                index,
+                name_buf.as_mut_ptr(),
+                &mut name_len,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            );
+            if status != ERROR_SUCCESS {
+                break;
+            }
+            index += 1;
+
+            let package_name = String::from_utf16_lossy(&name_buf[..name_len as usize]);
+            if !prefixes.iter().any(|p| package_name.starts_with(p)) {
+                continue;
+            }
+
+            let mut pkg_key: HKey = ptr::null_mut();
+            if RegOpenKeyExW(
+                repo_key,
+                to_wide(&package_name).as_ptr(),
+                0,
+                KEY_READ,
+                &mut pkg_key,
+            ) == ERROR_SUCCESS
+            {
+                if let Some(folder) = reg_read_string(pkg_key, "PackageRootFolder") {
+                    roots.push(PathBuf::from(folder));
+                }
+                RegCloseKey(pkg_key);
+            }
+        }
+
+        RegCloseKey(repo_key);
+    }
+    roots
+}
 
 pub type CFTypeRef = *const std::ffi::c_void;
 pub type CFStringRef = *const std::ffi::c_void;
@@ -145,15 +302,64 @@ pub struct AppleLibraries {
 
 static LIBRARIES: OnceLock<Arc<AppleLibraries>> = OnceLock::new();
 
+fn has_required_dlls(dir: &Path) -> bool {
+    dir.join("CoreFoundation.dll").is_file()
+        && dir.join("MobileDevice.dll").is_file()
+        && dir.join("AirTrafficHost.dll").is_file()
+}
+
+/// Mirror Apple device DLLs out of a Microsoft Store package into a writable
+/// per-user cache. Files under WindowsApps are readable but LoadLibraryExW
+/// from that folder returns ERROR_ACCESS_DENIED.
+fn stage_support_dir(src: &Path) -> Option<PathBuf> {
+    let local = std::env::var_os("LOCALAPPDATA")?;
+    let key: String = src
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let dest = PathBuf::from(local)
+        .join("AirCard")
+        .join("amds-cache")
+        .join(key);
+
+    if has_required_dlls(&dest) {
+        return Some(dest);
+    }
+
+    fs::create_dir_all(&dest).ok()?;
+    for entry in fs::read_dir(src).ok()?.flatten() {
+        let path = entry.path();
+        let is_dll = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("dll"));
+        if is_dll && let Some(name) = path.file_name() {
+            let _ = fs::copy(&path, dest.join(name));
+        }
+    }
+
+    has_required_dlls(&dest).then_some(dest)
+}
+
 pub fn locate_support_dir() -> Option<PathBuf> {
-    APPLE_SUPPORT_DIRS
-        .iter()
-        .map(PathBuf::from)
-        .find(|dir| {
-            dir.join("CoreFoundation.dll").is_file()
-                && dir.join("MobileDevice.dll").is_file()
-                && dir.join("AirTrafficHost.dll").is_file()
-        })
+    for dir in APPLE_SUPPORT_DIRS.iter().map(PathBuf::from) {
+        if has_required_dlls(&dir) {
+            return Some(dir);
+        }
+    }
+
+    for root in msix_package_roots(APPLE_PACKAGE_PREFIXES) {
+        for candidate in [root.join("AMDS64"), root] {
+            if has_required_dlls(&candidate)
+                && let Some(staged) = stage_support_dir(&candidate)
+            {
+                return Some(staged);
+            }
+        }
+    }
+
+    None
 }
 
 pub fn get_apple_libraries() -> Result<Arc<AppleLibraries>> {
@@ -471,4 +677,17 @@ pub fn verify_support() -> Result<String> {
     let _libs = get_apple_libraries()?;
     let dir = locate_support_dir().unwrap_or_default();
     Ok(format!("Apple Mobile Device Support ready: {}", dir.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn msix_discovery_is_robust() {
+        let roots = msix_package_roots(APPLE_PACKAGE_PREFIXES);
+        for root in &roots {
+            assert!(root.is_absolute(), "package root should be absolute: {root:?}");
+        }
+    }
 }

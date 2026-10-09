@@ -36,20 +36,16 @@ pub fn get_cards_storage_path() -> PathBuf {
 }
 
 pub fn is_valid_card_hash(h: &str) -> bool {
-    let trimmed = h.trim_matches(['\'', '"']).trim_end_matches(['.', ',']);
+    let trimmed = h.trim().trim_matches(['\'', '"', '.', ',']).trim();
     let len = trimmed.len();
     // Real Apple Wallet card hashes are SHA-1 (27-28 chars) or SHA-256 (43-44 chars)
     if len != 27 && len != 28 && len != 43 && len != 44 {
         return false;
     }
 
-    // Must be base64 alphabet characters
+    // Must be base64 alphabet characters (URL-safe included). Hyphen/underscore
+    // count is not a garbage heuristic — real IDs can contain several of each.
     if !trimmed.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '-' || c == '_' || c == '=') {
-        return false;
-    }
-
-    // Reject strings with multiple underscores or hyphens (typical of system asset/bundle names)
-    if trimmed.chars().filter(|&c| c == '_').count() > 1 || trimmed.chars().filter(|&c| c == '-').count() > 2 {
         return false;
     }
 
@@ -234,8 +230,8 @@ static DESC_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 static CARD_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
-        Regex::new(r"/(?:Cards|Passes/Cards)/([A-Za-z0-9+/_-]{27,44})(?:\.pkpass|\.cache|\.pkcache|/|\s|\x22|'|\)|,|$)").unwrap(),
-        Regex::new(r"/([A-Za-z0-9+/_-]{27,44})\.(?:pkpass|cache|pkcache)").unwrap(),
+        Regex::new(r"/(?:Cards|Passes/Cards)/([A-Za-z0-9+/=_-]{27,44})(?:\.pkpass|\.cache|\.pkcache|/|\s|\x22|'|\)|,|$)").unwrap(),
+        Regex::new(r"/([A-Za-z0-9+/=_-]{27,44})\.(?:pkpass|cache|pkcache)").unwrap(),
         Regex::new(r"(?:^|[^A-Za-z0-9+/_-])([A-Za-z0-9+/_-]{27}=)(?:$|[^A-Za-z0-9+/_-])").unwrap(),
         Regex::new(r"(?i)(?:card[_\s]?(?:hash|id)|pass[_\s]?(?:hash|id)|unique[_\s]?id)\s*[:=]\s*['\x22]?([A-Za-z0-9+=_-]{27,44})").unwrap(),
     ]
@@ -263,7 +259,7 @@ pub fn extract_card_hash_from_line(line: &str) -> Option<String> {
     for r in CARD_REGEXES.iter() {
         if let Some(caps) = r.captures(line) {
             if let Some(m) = caps.get(1) {
-                let h = m.as_str().trim().trim_matches(['\'', '"']).trim_end_matches(['.', ',']);
+                let h = m.as_str().trim().trim_matches(['\'', '"', '.', ',']);
                 if is_valid_card_hash(h) {
                     let mut norm = h.to_string();
                     if norm.len() == 27 {
@@ -387,6 +383,12 @@ mod tests {
             Some("d64fKk0kyHWP11IWV2GRLud4XQk=".to_string())
         );
 
+        let line3 = "passd: Accessing /var/mobile/Library/Passes/Cards/c5g3sMLJHXE63-5NVq-aZE81M-s=.pkpass";
+        assert_eq!(
+            extract_card_hash_from_line(line3),
+            Some("c5g3sMLJHXE63-5NVq-aZE81M-s=".to_string())
+        );
+
         // Dummy/unrelated lines should be ignored
         let dummy = "passd: Using dummy hash hwAtAmHKYwsQrJbT5cTNDsaxVME=";
         assert_eq!(extract_card_hash_from_line(dummy), None);
@@ -407,6 +409,12 @@ mod tests {
         assert!(is_valid_card_hash("OM6NYhwXMZrAw0sRUjR62wmF4ZQ="));
         assert!(is_valid_card_hash("d64fKk0kyHWP11IWV2GRLud4XQk="));
         assert!(is_valid_card_hash("d64fKk0kyHWP11IWV2GRLud4XQk"));
+        assert!(is_valid_card_hash("  OM6NYhwXMZrAw0sRUjR62wmF4ZQ=  "));
+        assert!(is_valid_card_hash("'OM6NYhwXMZrAw0sRUjR62wmF4ZQ=' "));
+        assert!(is_valid_card_hash(" \"OM6NYhwXMZrAw0sRUjR62wmF4ZQ=\", "));
+        // URL-safe IDs with three hyphens (rejected by the old count heuristic).
+        assert!(is_valid_card_hash("c5g3sMLJHXE63-5NVq-aZE81M-s="));
+        assert!(!is_valid_card_hash("kJL-D0rr-SZhbj2c8nK-OQ9hCMY="));
 
         // System garbage strings that must be rejected
         let garbage = [
