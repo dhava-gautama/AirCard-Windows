@@ -1,10 +1,25 @@
 # AirCard (Windows)
 
-**Apple Wallet card skinner & lockscreen passcode themer for iOS 18+ (no jailbreak).** Native Rust client. This public fork keeps Lumid-Off’s Windows port and adds a working AirTraffic handshake on Windows (including **iOS 26.x**).
+**Apple Wallet card skinner & lockscreen passcode themer for iOS 18.0–27.0.1 and iOS 27.2 beta 1–2 (no jailbreak).** Native Rust client. This public fork keeps Lumid-Off’s Windows port and adds a working AirTraffic handshake on Windows (including **iOS 26.x**). **iOS 27.2 beta 3+ is patched.**
 
 **Tutorial Bahasa Indonesia:** [TUTORIAL.id.md](TUTORIAL.id.md)
 
 > Unofficial. Back up the iPhone first. Apple can patch this path; skins can vanish after an iOS update.
+
+## Compatibility
+
+Same Airlift / AirTraffic write path as [Mak5er/AirCard](https://github.com/Mak5er/AirCard). If Apple patches it on Mac, it is patched here too.
+
+| iOS Version | Status | Notes |
+| :--- | :--- | :--- |
+| **iOS 18.0 – 27.0.1** | ✅ Supported | Full support for Wallet skins and lockscreen passcode themes |
+| **iOS 27.2 beta 1 – beta 2** | ✅ Supported | Working |
+| **iOS 27.2 beta 3+** | ❌ Patched | Apple patched the underlying `airlift` exploit. Flashing will not work. |
+
+> [!IMPORTANT]
+> Do not update to **iOS 27.2 beta 3 or newer** if you want to continue using AirCard. The underlying AirTraffic sync exploit was patched by Apple in beta 3.
+
+This fork was verified on **iPhone 18,2 / iOS 26.6**. A reporter confirmed Wallet skins on **iOS 27.0** with v1.3.3.
 
 ## What this fork fixes
 
@@ -95,6 +110,7 @@ Run `aircard.exe --probe` from PowerShell or cmd with one USB-connected, unlocke
 | StreamingZip / `kAMDEOFError` / send failed | Leftover Books staging after Save original. Retry; this build cleans staging first and resends the zip in 32 KiB chunks |
 | Transit hash not found | Wallet → card → … → Card Details → Turn on Service Mode, then Scan |
 | Restore original disabled | Click **Save original** before the first custom skin |
+| iOS 27.2 beta 3 or newer | Airlift is patched. Flashing will not work; stay on 27.0.1 or 27.2 beta 1–2 |
 
 If the iPhone is still missing after that, Apple USB drivers on Windows are often the cause. Optional last resort:
 
